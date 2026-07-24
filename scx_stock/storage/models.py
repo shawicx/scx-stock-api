@@ -4,7 +4,7 @@
 
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, Float, Integer, String, func
+from sqlalchemy import Date, DateTime, Float, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from scx_stock.storage.db import Base
@@ -17,12 +17,13 @@ class StockModel(Base):
     """
 
     __tablename__ = "stock"
+    __table_args__ = (UniqueConstraint("code", "type", name="uq_stock_code_type"),)
 
     code: Mapped[str] = mapped_column(String(16), primary_key=True)
     name: Mapped[str] = mapped_column(String(64), index=True)
     market: Mapped[str] = mapped_column(String(16), index=True)
     pinyin: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    type: Mapped[str] = mapped_column(String(16), default="stock")  # stock / etf
+    type: Mapped[str] = mapped_column(String(16), primary_key=True)  # stock / etf
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -35,6 +36,9 @@ class KlineModel(Base):
     """
 
     __tablename__ = "kline"
+    __table_args__ = (
+        UniqueConstraint("code", "trade_date", name="uq_kline_code_date"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(16), index=True)

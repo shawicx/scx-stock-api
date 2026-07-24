@@ -30,6 +30,8 @@ def test_stock_route_mounted(client):
     assert resp.status_code == 200
     paths = resp.json()["paths"]
     assert "/api/v1/stock/{code}" in paths
+    assert "/api/v1/search" in paths
+    assert "/admin/sync" in paths
 
 
 def test_invalid_code_rejected(client):

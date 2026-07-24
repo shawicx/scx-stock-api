@@ -18,12 +18,14 @@ class StockInfo:
         market: str,
         industry: str | None = None,
         pinyin: str | None = None,
+        type: str | None = None,
     ) -> None:
         self.code = code
         self.name = name
         self.market = market
         self.industry = industry
         self.pinyin = pinyin
+        self.type = type
 
 
 class Quote:

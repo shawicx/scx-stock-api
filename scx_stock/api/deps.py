@@ -8,6 +8,7 @@ from fastapi import Depends
 
 from scx_stock.cache.backend import CacheBackend, get_cache
 from scx_stock.repository.router import StockRepository
+from scx_stock.service.search_service import SearchService
 from scx_stock.service.stock_service import StockService
 
 
@@ -29,3 +30,14 @@ async def get_stock_service(
     """
     repo = StockRepository(cache)
     return StockService(repo, cache)
+
+
+async def get_search_service(
+    cache: CacheBackend = Depends(get_cache_dep),
+) -> SearchService:
+    """提供 SearchService。
+
+    :param cache: 缓存后端（依赖注入）。
+    :returns: SearchService 实例。
+    """
+    return SearchService(cache)

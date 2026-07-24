@@ -1,5 +1,5 @@
 """
-@description AkShare 数据源实现，封装个股行情、搜索等能力。
+@description AkShare 数据源实现，封装个股行情、ETF、搜索等能力。
 """
 
 import logging
@@ -10,6 +10,7 @@ import akshare as ak
 from scx_stock.exceptions.provider import ProviderError, ProviderUnavailableError
 from scx_stock.provider.base import SyncProviderBase
 from scx_stock.schema.stock import Quote, StockInfo
+from scx_stock.search.pinyin import make_pinyin_for_search
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,7 @@ class AkshareProvider(SyncProviderBase):
     async def list_stocks(self) -> list[StockInfo]:
         """获取 A 股全量股票列表，用于搜索索引构建。
 
-        :returns: StockInfo 列表。
+        :returns: StockInfo 列表（含拼音与 type）。
         """
         try:
             df = await self._run(ak.stock_zh_a_spot_em)
@@ -102,6 +103,28 @@ class AkshareProvider(SyncProviderBase):
             logger.warning("akshare list_stocks failed: %s", e)
             raise ProviderUnavailableError("akshare stock list unavailable") from e
 
+        return self._df_to_stock_info(df, default_type="stock")
+
+    async def list_etfs(self) -> list[StockInfo]:
+        """获取全量 ETF 列表，用于搜索索引构建。
+
+        :returns: StockInfo 列表（含拼音与 type=etf）。
+        """
+        try:
+            df = await self._run(ak.fund_etf_spot_em)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("akshare list_etfs failed: %s", e)
+            raise ProviderUnavailableError("akshare etf list unavailable") from e
+
+        return self._df_to_stock_info(df, default_type="etf")
+
+    def _df_to_stock_info(self, df: Any, default_type: str) -> list[StockInfo]:
+        """把 AkShare DataFrame 转为 StockInfo 列表。
+
+        :param df: AkShare 返回的 DataFrame。
+        :param default_type: 默认类型（stock/etf）。
+        :returns: StockInfo 列表。
+        """
         if df is None or df.empty:
             return []
 
@@ -110,11 +133,14 @@ class AkshareProvider(SyncProviderBase):
             code = str(r.get("代码", "")).strip()
             if not code:
                 continue
+            name = str(r.get("名称", "")).strip()
             out.append(
                 StockInfo(
                     code=code,
-                    name=str(r.get("名称", "")),
+                    name=name,
                     market=__classify_market(code),
+                    pinyin=make_pinyin_for_search(name),
+                    type=default_type,
                 )
             )
         return out
