@@ -44,8 +44,29 @@ class Settings(BaseSettings):
     default_provider: str = "akshare"
     request_timeout: int = 10
 
+    # CORS（前端联调用；逗号分隔的源列表，'*' 表示全部允许）
+    cors_origins: str = (
+        "http://localhost:3000,"
+        "http://127.0.0.1:3000,"
+        "http://localhost:5173,"
+        "http://127.0.0.1:5173,"
+        "http://localhost:8080,"
+        "http://127.0.0.1:8080"
+    )
+
+    # 分页默认值
+    default_page_size: int = 20
+    max_page_size: int = 100
+
     # 限流
     ai_rate_limit_per_minute: int = 20
+
+    def cors_origin_list(self) -> list[str]:
+        """解析 CORS 允许源为列表。
+
+        :returns: 去空白后的源列表；含 '*' 时返回 ['*']。
+        """
+        return [s.strip() for s in self.cors_origins.split(",") if s.strip()]
 
 
 @lru_cache
