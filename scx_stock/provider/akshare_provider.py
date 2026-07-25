@@ -1,5 +1,5 @@
 """
-@description AkShare 数据源实现，封装个股行情、ETF、搜索等能力。
+@description AkShare 数据源实现，封装个股行情、ETF、板块、指数等能力。
 """
 
 import logging
@@ -9,6 +9,8 @@ import akshare as ak
 
 from scx_stock.exceptions.provider import ProviderError, ProviderUnavailableError
 from scx_stock.provider.base import SyncProviderBase
+from scx_stock.schema.index import IndexQuote
+from scx_stock.schema.sector import SectorQuote
 from scx_stock.schema.stock import Quote, StockInfo
 from scx_stock.search.pinyin import make_pinyin_for_search
 
@@ -47,7 +49,7 @@ class AkshareProvider(SyncProviderBase):
         return StockInfo(
             code=code,
             name=info.get("股票简称", code),
-            market=__classify_market(code),
+            market=_classify_market(code),
             industry=info.get("行业"),
         )
 
@@ -72,8 +74,8 @@ class AkshareProvider(SyncProviderBase):
             raise ProviderError(f"quote not found: {code}")
 
         r = row.iloc[0]
-        last = __to_float(r.get("最新价"))
-        prev = __to_float(r.get("昨收"))
+        last = _to_float(r.get("最新价"))
+        prev = _to_float(r.get("昨收"))
         change = last - prev if last and prev else None
         change_pct = (change / prev * 100) if (change is not None and prev) else None
 
@@ -84,12 +86,12 @@ class AkshareProvider(SyncProviderBase):
             prev_close=prev,
             change=change,
             change_pct=change_pct,
-            volume=__to_float(r.get("成交量")),
-            amount=__to_float(r.get("成交额")),
-            high=__to_float(r.get("最高")),
-            low=__to_float(r.get("最低")),
-            open=__to_float(r.get("今开")),
-            timestamp=__now_str(),
+            volume=_to_float(r.get("成交量")),
+            amount=_to_float(r.get("成交额")),
+            high=_to_float(r.get("最高")),
+            low=_to_float(r.get("最低")),
+            open=_to_float(r.get("今开")),
+            timestamp=_now_str(),
         )
 
     async def list_stocks(self) -> list[StockInfo]:
@@ -138,15 +140,112 @@ class AkshareProvider(SyncProviderBase):
                 StockInfo(
                     code=code,
                     name=name,
-                    market=__classify_market(code),
+                    market=_classify_market(code),
                     pinyin=make_pinyin_for_search(name),
                     type=default_type,
                 )
             )
         return out
 
+    async def list_sectors(self) -> list[SectorQuote]:
+        """获取行业板块实时涨跌列表（东方财富）。
 
-def __to_float(v: Any) -> float | None:
+        :returns: SectorQuote 列表。
+        :raises ProviderUnavailableError: 数据源不可用。
+        """
+        try:
+            df = await self._run(ak.stock_board_industry_name_em)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("akshare list_sectors failed: %s", e)
+            raise ProviderUnavailableError("akshare sector list unavailable") from e
+
+        if df is None or df.empty:
+            return []
+
+        out: list[SectorQuote] = []
+        for _, r in df.iterrows():
+            out.append(
+                SectorQuote(
+                    code=str(r.get("板块代码", "")).strip(),
+                    name=str(r.get("板块名称", "")).strip(),
+                    price=_to_float(r.get("最新价")),
+                    change=_to_float(r.get("涨跌额")),
+                    change_pct=_to_float(r.get("涨跌幅")),
+                    total_market_cap=_to_float(r.get("总市值")),
+                    turnover_rate=_to_float(r.get("换手率")),
+                    up_count=_to_int(r.get("上涨家数")),
+                    down_count=_to_int(r.get("下跌家数")),
+                    leading_stock=str(r.get("领涨股票") or "").strip() or None,
+                    leading_stock_change_pct=_to_float(r.get("领涨股票-涨跌幅")),
+                )
+            )
+        return out
+
+    async def get_sector_constituents(self, sector_name: str) -> list[dict[str, str]]:
+        """获取板块成分股（按板块名称，如 "小金属"）。
+
+        :param sector_name: 板块名称（东方财富行业板块名）。
+        :returns: 成分股列表，每项含 code / name。
+        :raises ProviderError: 数据源异常或板块不存在。
+        """
+        try:
+            df = await self._run(ak.stock_board_industry_cons_em, symbol=sector_name)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("akshare get_sector_constituents failed: %s", e)
+            raise ProviderUnavailableError(
+                f"akshare sector constituents unavailable: {sector_name}"
+            ) from e
+
+        if df is None or df.empty:
+            return []
+
+        out: list[dict[str, str]] = []
+        for _, r in df.iterrows():
+            code = str(r.get("代码", "")).strip()
+            if not code:
+                continue
+            out.append({"code": code, "name": str(r.get("名称", "")).strip()})
+        return out
+
+    async def list_indexes(self, group: str = "沪深重要指数") -> list[IndexQuote]:
+        """获取指数实时行情列表（东方财富）。
+
+        :param group: 指数分组，可选：沪深重要指数 / 上证系列指数 / 深证系列指数 /
+            指数成份 / 中证系列指数。
+        :returns: IndexQuote 列表。
+        :raises ProviderUnavailableError: 数据源不可用。
+        """
+        try:
+            df = await self._run(ak.stock_zh_index_spot_em, symbol=group)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("akshare list_indexes failed: %s", e)
+            raise ProviderUnavailableError("akshare index list unavailable") from e
+
+        if df is None or df.empty:
+            return []
+
+        out: list[IndexQuote] = []
+        for _, r in df.iterrows():
+            out.append(
+                IndexQuote(
+                    code=str(r.get("代码", "")).strip(),
+                    name=str(r.get("名称", "")).strip(),
+                    price=_to_float(r.get("最新价")),
+                    change_pct=_to_float(r.get("涨跌幅")),
+                    change=_to_float(r.get("涨跌额")),
+                    volume=_to_float(r.get("成交量")),
+                    amount=_to_float(r.get("成交额")),
+                    amplitude=_to_float(r.get("振幅")),
+                    high=_to_float(r.get("最高")),
+                    low=_to_float(r.get("最低")),
+                    open=_to_float(r.get("今开")),
+                    prev_close=_to_float(r.get("昨收")),
+                )
+            )
+        return out
+
+
+def _to_float(v: Any) -> float | None:
     """安全转 float，失败返回 None。
 
     :param v: 原始值。
@@ -160,7 +259,17 @@ def __to_float(v: Any) -> float | None:
         return None
 
 
-def __now_str() -> str:
+def _to_int(v: Any) -> int | None:
+    """安全转 int，失败返回 None。
+
+    :param v: 原始值。
+    :returns: int 或 None。
+    """
+    f = _to_float(v)
+    return int(f) if f is not None else None
+
+
+def _now_str() -> str:
     """当前时间 ISO 字符串。
 
     :returns: ISO 格式时间。
@@ -170,7 +279,7 @@ def __now_str() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def __classify_market(code: str) -> str:
+def _classify_market(code: str) -> str:
     """按代码前缀识别市场。
 
     :param code: 股票代码。

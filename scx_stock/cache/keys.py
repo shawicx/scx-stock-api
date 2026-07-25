@@ -30,3 +30,29 @@ def search_result(keyword: str) -> str:
     :returns: 缓存键。
     """
     return f"{PREFIX}:search:{keyword}"
+
+
+def sector_list() -> str:
+    """行业板块列表缓存键。
+
+    :returns: 缓存键。
+    """
+    return f"{PREFIX}:sector:list"
+
+
+def sector_detail(name: str) -> str:
+    """板块详情缓存键。
+
+    :param name: 板块名称。
+    :returns: 缓存键。
+    """
+    return f"{PREFIX}:sector:detail:{name}"
+
+
+def index_list(group: str) -> str:
+    """指数列表缓存键。
+
+    :param group: 指数分组。
+    :returns: 缓存键。
+    """
+    return f"{PREFIX}:index:list:{group}"

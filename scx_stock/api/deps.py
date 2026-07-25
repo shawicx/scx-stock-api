@@ -7,8 +7,12 @@ from typing import AsyncGenerator
 from fastapi import Depends
 
 from scx_stock.cache.backend import CacheBackend, get_cache
+from scx_stock.repository.index_repo import IndexRepository
 from scx_stock.repository.router import StockRepository
+from scx_stock.repository.sector_repo import SectorRepository
+from scx_stock.service.index_service import IndexService
 from scx_stock.service.search_service import SearchService
+from scx_stock.service.sector_service import SectorService
 from scx_stock.service.stock_service import StockService
 
 
@@ -41,3 +45,27 @@ async def get_search_service(
     :returns: SearchService 实例。
     """
     return SearchService(cache)
+
+
+async def get_sector_service(
+    cache: CacheBackend = Depends(get_cache_dep),
+) -> SectorService:
+    """提供 SectorService。
+
+    :param cache: 缓存后端（依赖注入）。
+    :returns: SectorService 实例。
+    """
+    repo = SectorRepository(cache)
+    return SectorService(repo, cache)
+
+
+async def get_index_service(
+    cache: CacheBackend = Depends(get_cache_dep),
+) -> IndexService:
+    """提供 IndexService。
+
+    :param cache: 缓存后端（依赖注入）。
+    :returns: IndexService 实例。
+    """
+    repo = IndexRepository(cache)
+    return IndexService(repo, cache)
