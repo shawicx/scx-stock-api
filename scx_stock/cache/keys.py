@@ -23,6 +23,23 @@ def stock_list() -> str:
     return f"{PREFIX}:stock:list"
 
 
+def stock_quote_list(market: str) -> str:
+    """股票实时行情列表缓存键。
+
+    :param market: 市场标识（如 "全部"/"上证"）。
+    :returns: 缓存键。
+    """
+    return f"{PREFIX}:stock:quote-list:{market}"
+
+
+def etf_quote_list() -> str:
+    """ETF 实时行情列表缓存键。
+
+    :returns: 缓存键。
+    """
+    return f"{PREFIX}:etf:quote-list"
+
+
 def search_result(keyword: str) -> str:
     """搜索结果缓存键。
 

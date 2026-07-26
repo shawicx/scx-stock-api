@@ -115,7 +115,42 @@ if (res.status >= 200 && res.status < 300 && res.data.code === 0) {
 
 完整契约见 `/docs`，核心接口如下。
 
-### 4.1 个股详情
+### 4.1 股票/ETF 行情列表
+
+```
+GET /api/v1/stock/list
+```
+
+| 参数 | 位置 | 默认 | 说明 |
+|------|------|------|------|
+| `market` | query | `全部` | 市场板块：上证/深证/创业板/科创板/北交所/全部 |
+| `type` | query | `stock` | 证券类型：stock/etf/all |
+| `sort_by` | query | `change_pct` | 排序字段：change_pct/amount/turnover_rate |
+| `descending` | query | `true` | 是否降序 |
+| `page` | query | `1` | 页码（从 1 起） |
+| `page_size` | query | `20` | 每页条数（1~100） |
+
+成功 `data`：
+```json
+{
+  "items": [
+    {
+      "code": "600519", "name": "贵州茅台", "market": "上证",
+      "price": 1800.0, "change": 10.0, "change_pct": 0.56,
+      "amount": 1000000000, "volume": 123456, "turnover_rate": 0.5,
+      "high": 1810.0, "low": 1785.0, "open": 1795.0, "prev_close": 1790.0
+    }
+  ],
+  "total": 5000, "page": 1, "page_size": 20
+}
+```
+
+> 限制：
+> - `type=etf` 时忽略 `market`（ETF 不按板块细分）。
+> - `market=北交所` 在当前数据源（`stock_zh_a_spot_em`）下可能返回空，属预期行为。
+> - 行情数据有 120 秒缓存，短时间内重复请求命中缓存。
+
+### 4.2 个股详情
 
 ```
 GET /api/v1/stock/{code}
@@ -143,7 +178,7 @@ GET /api/v1/stock/{code}
 
 > 限制：当前仅支持 A 股个股代码。ETF / 美股 / 港股由其他端点提供（待实现）。
 
-### 4.2 搜索
+### 4.3 搜索
 
 ```
 GET /api/v1/search?q={keyword}&limit={limit}
@@ -171,13 +206,13 @@ GET /api/v1/search?q={keyword}&limit={limit}
 > 注：搜索依赖内存索引，索引由定时任务每日 09:00 构建。索引为空时返回 `[]`，
 > 可调用 `POST /admin/sync` 手动触发首次同步。
 
-### 4.3 索引大小（运维）
+### 4.4 索引大小（运维）
 
 ```
 GET /api/v1/search/index-size
 ```
 
-### 4.4 健康检查
+### 4.5 健康检查
 
 ```
 GET /health          存活探针（进程在跑即 ok）
@@ -195,7 +230,7 @@ GET /health/ready    就绪探针（检查缓存 / DB 依赖）
 }
 ```
 
-### 4.5 运维端点
+### 4.6 运维端点
 
 ```
 POST /admin/sync       手动触发：股票列表 → ETF 列表 → 重建索引
@@ -250,6 +285,7 @@ const detail = await api.get('/api/v1/stock/600519')
 
 | 能力 | 状态 | 端点 |
 |------|------|------|
+| 股票/ETF 行情列表 | ✅ | `GET /api/v1/stock/list` |
 | A 股个股详情 | ✅ | `GET /api/v1/stock/{code}` |
 | 搜索（代码/简称/拼音） | ✅ | `GET /api/v1/search` |
 | 健康检查 | ✅ | `GET /health`、`GET /health/ready` |

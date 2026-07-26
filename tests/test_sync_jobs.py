@@ -44,6 +44,44 @@ async def test_sync_stock_list_handles_provider_error():
 
 
 @pytest.mark.asyncio
+async def test_sync_stock_list_handles_db_write_error():
+    """DB 写入失败时返回 0 且不抛异常（不阻断后续同步步骤）。"""
+    fake_items = [
+        StockInfo(code="600519", name="贵州茅台", market="上证", pinyin="gz|gzmt", type="stock"),
+    ]
+    with patch.object(
+        sync_jobs.AkshareProvider, "list_stocks", new=AsyncMock(return_value=fake_items)
+    ):
+        with patch.object(
+            sync_jobs.repo,
+            "upsert_stocks",
+            new=AsyncMock(side_effect=RuntimeError("role postgres does not exist")),
+        ):
+            result = await sync_jobs.sync_stock_list()
+
+    assert result == {"stock_count": 0}
+
+
+@pytest.mark.asyncio
+async def test_sync_etf_list_handles_db_write_error():
+    """ETF 的 DB 写入失败时返回 0 且不抛异常。"""
+    fake_items = [
+        StockInfo(code="159320", name="电网设备ETF广发", market="深证", pinyin="dianwang|dw", type="etf"),
+    ]
+    with patch.object(
+        sync_jobs.AkshareProvider, "list_etfs", new=AsyncMock(return_value=fake_items)
+    ):
+        with patch.object(
+            sync_jobs.repo,
+            "upsert_stocks",
+            new=AsyncMock(side_effect=RuntimeError("db connection refused")),
+        ):
+            result = await sync_jobs.sync_etf_list()
+
+    assert result == {"etf_count": 0}
+
+
+@pytest.mark.asyncio
 async def test_rebuild_search_index_loads_from_db():
     """rebuild_search_index 从 DB 加载并构建索引。"""
     # 模拟 ORM 对象

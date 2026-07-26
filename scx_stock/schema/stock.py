@@ -4,6 +4,8 @@
 
 from datetime import datetime
 
+from pydantic import BaseModel
+
 
 class StockInfo:
     """个股基础信息（纯 dataclass 风格占位，后续可改为 Pydantic BaseModel）。
@@ -122,3 +124,36 @@ class StockDetailResponse:
             "quote": self.quote.to_dict(),
             "fetched_at": self.fetched_at.isoformat(timespec="seconds"),
         }
+
+
+class StockListItem(BaseModel):
+    """股票/ETF 列表行情条目（用于列表/排行接口）。
+
+    :param code: 证券代码。
+    :param name: 简称。
+    :param market: 市场板块（上证/深证/创业板/科创板/北交所/ETF）。
+    :param price: 最新价。
+    :param change: 涨跌额。
+    :param change_pct: 涨跌幅（%）。
+    :param amount: 成交额。
+    :param volume: 成交量。
+    :param turnover_rate: 换手率（%）。
+    :param high: 最高价。
+    :param low: 最低价。
+    :param open: 今开。
+    :param prev_close: 昨收。
+    """
+
+    code: str
+    name: str
+    market: str
+    price: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    amount: float | None = None
+    volume: float | None = None
+    turnover_rate: float | None = None
+    high: float | None = None
+    low: float | None = None
+    open: float | None = None
+    prev_close: float | None = None

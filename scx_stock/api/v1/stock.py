@@ -17,6 +17,59 @@ router = APIRouter(prefix="/stock", tags=["个股"])
 _CODE_RE = re.compile(r"^[0368]\d{4,5}$")
 
 
+@router.get("/list", response_model=ApiResponse, summary="获取股票/ETF行情列表")
+async def list_stocks(
+    market: str = Query(
+        "全部",
+        pattern="^(上证|深证|创业板|科创板|北交所|全部)$",
+        description="市场板块筛选",
+    ),
+    type: str = Query(
+        "stock",
+        pattern="^(stock|etf|all)$",
+        description="证券类型：stock/etf/all",
+    ),
+    sort_by: str = Query(
+        "change_pct",
+        pattern="^(change_pct|amount|turnover_rate)$",
+        description="排序字段",
+    ),
+    descending: bool = Query(True, description="是否降序"),
+    page: int = Query(1, ge=1, description="页码（从 1 起）"),
+    page_size: int = Query(20, ge=1, le=100, description="每页条数（1~100）"),
+    service: StockService = Depends(get_stock_service),
+) -> dict[str, object]:
+    """获取股票/ETF 实时行情列表（含涨跌、成交、换手等）。
+
+    数据源实时拉取 + Redis 分钟级缓存，支持市场细分筛选、排序、内存分页。
+
+    :param market: 市场板块。
+    :param type: 证券类型。
+    :param sort_by: 排序字段。
+    :param descending: 是否降序。
+    :param page: 页码。
+    :param page_size: 每页条数。
+    :param service: StockService。
+    :returns: 统一响应，data 为 {items, total, page, page_size}。
+    """
+    items, total = await service.list_stocks(
+        market=market,
+        type_=type,
+        sort_by=sort_by,
+        descending=descending,
+        page=page,
+        page_size=page_size,
+    )
+    return ok(
+        {
+            "items": [i.model_dump() for i in items],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+    )
+
+
 @router.get("/{code}", response_model=ApiResponse, summary="获取个股详情")
 async def get_stock_detail(
     code: str,

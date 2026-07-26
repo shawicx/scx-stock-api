@@ -3,17 +3,37 @@
 """
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _project_root() -> Path:
+    """定位项目根目录（包含 pyproject.toml 的目录）。
+
+    避免依赖进程 cwd 解析 .env，保证从任意目录启动都能读到同一份配置。
+
+    :returns: 项目根目录 Path。
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "pyproject.toml").exists():
+            return parent
+    # 兜底：退回到包的上两级（config -> scx_stock -> 根）
+    return here.parents[2]
+
+
+# .env 固定指向项目根目录，不随进程 cwd 变化
+_ENV_FILE = _project_root() / ".env"
+
+
 class Settings(BaseSettings):
     """应用全局配置。"""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         env_prefix="SCX_",
         extra="ignore",
@@ -29,10 +49,12 @@ class Settings(BaseSettings):
     # 数据库（PostgreSQL）
     db_host: str = "127.0.0.1"
     db_port: int = 5433
-    db_user: str = "postgres"
-    db_password: str = "postgres"
+    db_user: str = "scx"
+    db_password: str = "your_secure_password_here"
     db_name: str = "scx-stock"
     db_echo: bool = False
+    # 服务启动时若目标库不存在是否自动创建（开发期便利；生产建议关闭）
+    db_auto_create: bool = True
 
     # 缓存（Redis）
     redis_host: str = "127.0.0.1"

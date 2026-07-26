@@ -57,16 +57,31 @@ async def sync_stock_list() -> dict[str, int]:
 
     :returns: {"stock_count": N}。
     """
+    import time
+
     provider = AkshareProvider()
+    t0 = time.time()
     try:
         items = await provider.list_stocks()
     except Exception as e:  # noqa: BLE001
-        logger.exception("sync_stock_list fetch failed: %s", e)
+        logger.warning(
+            "sync_stock_list fetch failed in %.1fs: %s: %s",
+            time.time() - t0, type(e).__name__, str(e)[:200],
+        )
         return {"stock_count": 0}
 
+    logger.info(
+        "sync_stock_list fetched %d stocks in %.1fs, writing to DB",
+        len(items), time.time() - t0,
+    )
     rows = _to_rows(items, "stock")
-    written = await repo.upsert_stocks(rows)
-    logger.info("sync_stock_list done: %d stocks", written)
+    try:
+        written = await repo.upsert_stocks(rows)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("sync_stock_list db write failed: %s", e)
+        return {"stock_count": 0}
+
+    logger.info("sync_stock_list done: %d stocks in %.1fs", written, time.time() - t0)
     return {"stock_count": written}
 
 
@@ -75,16 +90,31 @@ async def sync_etf_list() -> dict[str, int]:
 
     :returns: {"etf_count": N}。
     """
+    import time
+
     provider = AkshareProvider()
+    t0 = time.time()
     try:
         items = await provider.list_etfs()
     except Exception as e:  # noqa: BLE001
-        logger.exception("sync_etf_list fetch failed: %s", e)
+        logger.warning(
+            "sync_etf_list fetch failed in %.1fs: %s: %s",
+            time.time() - t0, type(e).__name__, str(e)[:200],
+        )
         return {"etf_count": 0}
 
+    logger.info(
+        "sync_etf_list fetched %d etfs in %.1fs, writing to DB",
+        len(items), time.time() - t0,
+    )
     rows = _to_rows(items, "etf")
-    written = await repo.upsert_stocks(rows)
-    logger.info("sync_etf_list done: %d etfs", written)
+    try:
+        written = await repo.upsert_stocks(rows)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("sync_etf_list db write failed: %s", e)
+        return {"etf_count": 0}
+
+    logger.info("sync_etf_list done: %d etfs in %.1fs", written, time.time() - t0)
     return {"etf_count": written}
 
 

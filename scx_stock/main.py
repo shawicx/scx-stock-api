@@ -121,14 +121,25 @@ def _register_admin(app: FastAPI) -> None:
     async def _manual_sync() -> dict[str, object]:
         """手动触发：股票列表 → ETF 列表 → 重建索引。
 
-        :returns: 统一响应，data 为同步计数；失败时 code 非 0。
+        各步独立容错：某步失败不影响后续。返回 data 含每步计数与耗时。
+        仅当 sync_all 整体抛异常（非预期）时才返回 code 非 0。
+
+        :returns: 统一响应，data 为 {stock_count, etf_count, index_size}。
         """
+        import time
+
+        t0 = time.time()
         try:
             result = await sync_all()
+            logger.info("manual sync completed in %.1fs: %s", time.time() - t0, result)
             return ok(result)
         except Exception as e:  # noqa: BLE001
-            logger.exception("manual sync failed")
-            return {"code": 1, "message": f"sync failed: {e}", "data": None}
+            logger.exception("manual sync failed after %.1fs", time.time() - t0)
+            return {
+                "code": 1,
+                "message": f"sync failed after {time.time()-t0:.1f}s: {type(e).__name__}: {e}",
+                "data": None,
+            }
 
     @app.post("/admin/reindex", tags=["运维"], summary="仅重建搜索索引")
     async def _manual_reindex() -> dict[str, object]:

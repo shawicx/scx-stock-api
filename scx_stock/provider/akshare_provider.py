@@ -11,7 +11,7 @@ from scx_stock.exceptions.provider import ProviderError, ProviderUnavailableErro
 from scx_stock.provider.base import SyncProviderBase
 from scx_stock.schema.index import IndexQuote
 from scx_stock.schema.sector import SectorQuote
-from scx_stock.schema.stock import Quote, StockInfo
+from scx_stock.schema.stock import Quote, StockInfo, StockListItem
 from scx_stock.search.pinyin import make_pinyin_for_search
 
 logger = logging.getLogger(__name__)
@@ -107,6 +107,53 @@ class AkshareProvider(SyncProviderBase):
 
         return self._df_to_stock_info(df, default_type="stock")
 
+    async def list_stock_quotes(self) -> list[StockListItem]:
+        """获取 A 股全市场实时行情列表（含价格/涨跌/换手等）。
+
+        :returns: StockListItem 列表。
+        :raises ProviderUnavailableError: 数据源不可用。
+        """
+        try:
+            df = await self._run(ak.stock_zh_a_spot_em)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("akshare list_stock_quotes failed: %s", e)
+            raise ProviderUnavailableError("akshare stock quote list unavailable") from e
+
+        return self._df_to_stock_quotes(df)
+
+    def _df_to_stock_quotes(self, df: Any) -> list[StockListItem]:
+        """把 A 股/ETF 快照 DataFrame 映射为 StockListItem 列表。
+
+        :param df: AkShare 快照 DataFrame。
+        :returns: StockListItem 列表。
+        """
+        if df is None or df.empty:
+            return []
+
+        out: list[StockListItem] = []
+        for _, r in df.iterrows():
+            code = str(r.get("代码", "")).strip()
+            if not code:
+                continue
+            out.append(
+                StockListItem(
+                    code=code,
+                    name=str(r.get("名称", "")).strip(),
+                    market=_classify_market(code),
+                    price=_to_float(r.get("最新价")),
+                    change=_to_float(r.get("涨跌额")),
+                    change_pct=_to_float(r.get("涨跌幅")),
+                    amount=_to_float(r.get("成交额")),
+                    volume=_to_float(r.get("成交量")),
+                    turnover_rate=_to_float(r.get("换手率")),
+                    high=_to_float(r.get("最高")),
+                    low=_to_float(r.get("最低")),
+                    open=_to_float(r.get("今开")),
+                    prev_close=_to_float(r.get("昨收")),
+                )
+            )
+        return out
+
     async def list_etfs(self) -> list[StockInfo]:
         """获取全量 ETF 列表，用于搜索索引构建。
 
@@ -119,6 +166,24 @@ class AkshareProvider(SyncProviderBase):
             raise ProviderUnavailableError("akshare etf list unavailable") from e
 
         return self._df_to_stock_info(df, default_type="etf")
+
+    async def list_etf_quotes(self) -> list[StockListItem]:
+        """获取全量 ETF 实时行情列表。
+
+        :returns: StockListItem 列表（market 统一为 "ETF"）。
+        :raises ProviderUnavailableError: 数据源不可用。
+        """
+        try:
+            df = await self._run(ak.fund_etf_spot_em)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("akshare list_etf_quotes failed: %s", e)
+            raise ProviderUnavailableError("akshare etf quote list unavailable") from e
+
+        items = self._df_to_stock_quotes(df)
+        # ETF 不按代码前缀细分市场，统一标记
+        for it in items:
+            it.market = "ETF"
+        return items
 
     def _df_to_stock_info(self, df: Any, default_type: str) -> list[StockInfo]:
         """把 AkShare DataFrame 转为 StockInfo 列表。

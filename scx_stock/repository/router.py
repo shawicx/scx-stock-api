@@ -11,13 +11,14 @@ from scx_stock.exceptions.provider import ProviderError
 from scx_stock.exceptions.service import NotFoundError
 from scx_stock.provider.akshare_provider import AkshareProvider
 from scx_stock.provider.base import SyncProviderBase
-from scx_stock.schema.stock import Quote, StockInfo
+from scx_stock.schema.stock import Quote, StockInfo, StockListItem
 
 logger = logging.getLogger(__name__)
 
 # 各领域缓存 TTL（秒），与持久化策略表一致
 _TTL_QUOTE = 30
 _TTL_STOCK_INFO = 300
+_TTL_QUOTE_LIST = 120  # 行情列表分钟级，与板块/指数一致
 
 
 # 数据源注册表：name -> provider 实例（懒加载）
@@ -98,6 +99,44 @@ class StockRepository:
         )
         await self._cache.set(cache_key, quote.to_dict(), _TTL_QUOTE)
         return quote
+
+    async def list_stock_quotes(self) -> list[StockListItem]:
+        """获取 A 股全市场实时行情列表（带缓存）。
+
+        缓存全量（market=全部），细分板块过滤交由 Service 层。
+
+        :returns: StockListItem 列表。
+        """
+        cache_key = keys.stock_quote_list("全部")
+        cached = await self._cache.get(cache_key)
+        if cached:
+            return [StockListItem(**item) for item in cached]
+
+        items = await self._call_with_fallback(
+            "stock", "list", lambda p: p.list_stock_quotes()
+        )
+        await self._cache.set(
+            cache_key, [i.model_dump() for i in items], _TTL_QUOTE_LIST
+        )
+        return items
+
+    async def list_etf_quotes(self) -> list[StockListItem]:
+        """获取全量 ETF 实时行情列表（带缓存）。
+
+        :returns: StockListItem 列表。
+        """
+        cache_key = keys.etf_quote_list()
+        cached = await self._cache.get(cache_key)
+        if cached:
+            return [StockListItem(**item) for item in cached]
+
+        items = await self._call_with_fallback(
+            "stock", "list", lambda p: p.list_etf_quotes()
+        )
+        await self._cache.set(
+            cache_key, [i.model_dump() for i in items], _TTL_QUOTE_LIST
+        )
+        return items
 
     async def _call_with_fallback(self, domain: str, code: str, invoker):
         """按主备优先级调用 Provider，全部失败抛 NotFoundError。

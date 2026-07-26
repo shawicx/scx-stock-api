@@ -2,8 +2,10 @@
 @description 数据库引擎与会话管理，基于 SQLAlchemy 异步引擎。
 """
 
+import logging
 from collections.abc import AsyncGenerator
 
+import asyncpg
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -11,7 +13,9 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
-from scx_stock.config.settings import get_dsn
+from scx_stock.config.settings import get_dsn, get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -62,13 +66,89 @@ def __is_echo() -> bool:
     return get_settings().db_echo
 
 
+def _is_database_missing_error(exc: Exception) -> bool:
+    """判断异常是否为「目标数据库不存在」。
+
+    asyncpg 把 ``FATAL: database "xxx" does not exist`` 抛为
+    InvalidCatalogNameError；SQLAlchemy 包装在 OperationalError.orig 中。
+    另外用消息关键字兜底，兼容不同 PG 客户端/版本。
+
+    :param exc: 捕获的异常。
+    :returns: 是否为库不存在错误。
+    """
+    if isinstance(exc, asyncpg.exceptions.InvalidCatalogNameError):
+        return True
+    orig = getattr(exc, "orig", None)
+    if isinstance(orig, asyncpg.exceptions.InvalidCatalogNameError):
+        return True
+    msg = str(exc).lower()
+    return "does not exist" in msg and "database" in msg
+
+
+def _maintenance_dsn() -> str:
+    """生成连接到 postgres 维护库的 DSN（用于 CREATE DATABASE）。
+
+    :returns: 指向 postgres 库的 asyncpg 连接串。
+    """
+    s = get_settings()
+    return (
+        f"postgresql+asyncpg://{s.db_user}:{s.db_password}"
+        f"@{s.db_host}:{s.db_port}/postgres"
+    )
+
+
+async def _create_database_if_missing() -> bool:
+    """连接 postgres 维护库，创建目标数据库（若不存在）。
+
+    :returns: 是否实际创建了数据库（已存在返回 False）。
+    :raises: 创建过程中的原始异常（如权限不足）。
+    """
+    s = get_settings()
+    # CREATE DATABASE 不能在事务里执行，用裸连接走 autocommit
+    conn = await asyncpg.connect(
+        host=s.db_host,
+        port=s.db_port,
+        user=s.db_user,
+        password=s.db_password,
+        database="postgres",
+    )
+    try:
+        # 参数化方式不支持 DDL，db_name 来自受信配置，直接拼入
+        exists = await conn.fetchval(
+            "SELECT 1 FROM pg_database WHERE datname = $1", s.db_name
+        )
+        if exists:
+            return False
+        await conn.execute(f'CREATE DATABASE "{s.db_name}"')
+        logger.info("auto-created database: %s", s.db_name)
+        return True
+    finally:
+        await conn.close()
+
+
 async def init_db() -> None:
-    """初始化数据库：建表（开发期使用，生产用 Alembic 迁移）。"""
+    """初始化数据库：建表（开发期使用，生产用 Alembic 迁移）。
+
+    若 ``db_auto_create`` 开启且目标库不存在，自动连 postgres 维护库创建。
+    """
     from scx_stock.storage import models  # noqa: F401 确保模型已注册
 
-    engine = get_engine()
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    try:
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as exc:
+        if not (
+            get_settings().db_auto_create and _is_database_missing_error(exc)
+        ):
+            raise
+        logger.warning("database missing, attempting auto-create: %s", exc)
+        await _create_database_if_missing()
+        # 创建后重建引擎（原引擎缓存了失效连接），再建表
+        await close_db()
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
 
 
 async def close_db() -> None:
