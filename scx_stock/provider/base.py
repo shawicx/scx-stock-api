@@ -1,15 +1,22 @@
 """
 @description Provider 基类，强制同步库走线程池，对外暴露 async。
 
-附带代理兼容处理：部分代理环境（Clash MITM / TUN fake-ip）对东方财富等国内
-数据源的 HTTPS 握手有干扰（SSL record layer failure）。通过 monkey-patch
-requests.Session，让国内数据源域名绕过系统代理直连。
+附带数据源兼容处理（monkey-patch requests.Session）：
+1. 注入浏览器 User-Agent：东方财富等数据源会拒绝无 UA 的请求（RemoteDisconnected），
+   AkShare 内部 requests.Session 不设 UA，需在 session 级别统一注入。
+2. 国内数据源绕过系统代理：部分代理环境对国内 HTTPS 做 MITM 导致 SSL 失败。
 """
 
 from typing import Any, Callable
 
 import requests
 from anyio import to_thread
+
+# 浏览器 User-Agent，伪装正常浏览器请求
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 # 需要绕过代理直连的国内数据源域名
 _DIRECT_DOMAINS = (
@@ -33,19 +40,27 @@ _original_session_request = requests.Session.request
 def _patched_session_request(
     self: Any, method: str, url: str, *args: Any, **kwargs: Any
 ):
-    """requests.Session.request 补丁：对国内数据源强制绕过代理直连。
+    """requests.Session.request 补丁：注入 UA + 国内源绕过代理。
 
-    AkShare 内部创建独立 requests.Session 发请求，会继承系统代理设置。
-    代理对国内 HTTPS 接口做 MITM 会导致 SSL record layer failure。
-    此补丁检测 URL 域名，对国内数据源设置 proxies={} 强制直连。
+    AkShare 内部创建独立 requests.Session 发请求，默认无 User-Agent 且
+    继承系统代理。此补丁：
+    - 统一注入浏览器 User-Agent（避免被东方财富反爬拒绝）
+    - 对国内数据源域名设置 proxies={} 强制直连（避免代理 SSL 干扰）
 
     :param self: Session 实例。
     :param method: HTTP 方法。
     :param url: 请求 URL。
     :returns: requests.Response。
     """
+    # 注入 User-Agent（不覆盖调用方显式设置的值）
+    headers = kwargs.setdefault("headers", {})
+    if not any(k.lower() == "user-agent" for k in headers):
+        headers["User-Agent"] = _USER_AGENT
+
+    # 国内数据源绕过代理
     if any(d in url for d in _DIRECT_DOMAINS):
         kwargs.setdefault("proxies", {"http": None, "https": None})
+
     return _original_session_request(self, method, url, *args, **kwargs)
 
 
