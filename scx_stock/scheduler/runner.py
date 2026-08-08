@@ -8,17 +8,24 @@ from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from scx_stock.scheduler.sync_jobs import rebuild_search_index, sync_all, sync_etf_list
+from scx_stock.scheduler.sync_jobs import (
+    rebuild_search_index,
+    sync_all,
+    sync_etf_list,
+    sync_stock_industries,
+)
 
 logger = logging.getLogger(__name__)
 
 # 默认调度计划（可被 Settings 覆盖）：
-#   - 每日 09:00 同步股票列表
+#   - 每日 09:00 同步股票列表（sync_all 内部串行：股票+ETF+行业+索引）
 #   - 每日 09:10 同步 ETF 列表
+#   - 每日 09:15 同步行业映射
 #   - 每日 09:20 重建搜索索引
 DEFAULT_SCHEDULE = {
     "sync_stock_list": {"cron": "0 9 * * 1-5", "func_name": "sync_stock_list"},
     "sync_etf_list": {"cron": "10 9 * * 1-5", "func_name": "sync_etf_list"},
+    "sync_stock_industries": {"cron": "15 9 * * 1-5", "func_name": "sync_stock_industries"},
     "rebuild_search_index": {
         "cron": "20 9 * * 1-5",
         "func_name": "rebuild_search_index",
@@ -27,8 +34,9 @@ DEFAULT_SCHEDULE = {
 
 # 任务名 → 异步函数
 _JOB_REGISTRY: dict[str, Any] = {
-    "sync_stock_list": sync_all,  # sync_all 内部串行：股票+ETF+索引
+    "sync_stock_list": sync_all,  # sync_all 内部串行：股票+ETF+行业+索引
     "sync_etf_list": sync_etf_list,
+    "sync_stock_industries": sync_stock_industries,
     "rebuild_search_index": rebuild_search_index,
 }
 

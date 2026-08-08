@@ -104,6 +104,7 @@ class StockRepository:
         """获取 A 股全市场实时行情列表（带缓存）。
 
         缓存全量（market=全部），细分板块过滤交由 Service 层。
+        回源时从 DB 加载行业映射并注入 Provider。
 
         :returns: StockListItem 列表。
         """
@@ -112,8 +113,14 @@ class StockRepository:
         if cached:
             return [StockListItem(**item) for item in cached]
 
+        # 行业映射来自 DB（Scheduler 每日同步），DB 不可用时为空
+        from scx_stock.storage import repo as _repo
+
+        industry_map = await _repo.load_all_industries()
+
         items = await self._call_with_fallback(
-            "stock", "list", lambda p: p.list_stock_quotes()
+            "stock", "list",
+            lambda p: p.list_stock_quotes(industry_map=industry_map),
         )
         await self._cache.set(
             cache_key, [i.model_dump() for i in items], _TTL_QUOTE_LIST

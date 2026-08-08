@@ -28,15 +28,19 @@ def test_stock_list_item_defaults_optional():
 
 
 def test_stock_list_item_accepts_all_fields():
-    """StockListItem 接受全部行情字段。"""
+    """StockListItem 接受全部行情字段（含主力资金与行业）。"""
     item = StockListItem(
         code="600519", name="贵州茅台", market="上证",
         price=1800.0, change=10.0, change_pct=0.56,
         amount=1e9, volume=123456, turnover_rate=0.5,
         high=1810.0, low=1785.0, open=1795.0, prev_close=1790.0,
+        main_net_inflow=5e8, main_net_inflow_pct=2.5, industry="白酒",
     )
     assert item.price == 1800.0
     assert item.change_pct == 0.56
+    assert item.main_net_inflow == 5e8
+    assert item.main_net_inflow_pct == 2.5
+    assert item.industry == "白酒"
 
 
 # ---------- Provider 字段映射 ----------
@@ -44,7 +48,7 @@ def test_stock_list_item_accepts_all_fields():
 
 @pytest.mark.asyncio
 async def test_provider_list_stock_quotes_maps_columns():
-    """list_stock_quotes 正确映射 A 股快照列名为 StockListItem。"""
+    """list_stock_quotes 正确映射 A 股快照 + 资金流 + 行业。"""
     df = pd.DataFrame(
         [
             {
@@ -63,9 +67,24 @@ async def test_provider_list_stock_quotes_maps_columns():
             }
         ]
     )
+    fund_df = pd.DataFrame(
+        [
+            {
+                "代码": "600519",
+                "名称": "贵州茅台",
+                "今日主力净流入-净额": 500_000_000,
+                "今日主力净流入-净占比": 2.5,
+            }
+        ]
+    )
     provider = AkshareProvider()
-    with patch("akshare.stock_zh_a_spot_em", return_value=df):
-        result = await provider.list_stock_quotes()
+    with (
+        patch("akshare.stock_zh_a_spot_em", return_value=df),
+        patch("akshare.stock_individual_fund_flow_rank", return_value=fund_df),
+    ):
+        result = await provider.list_stock_quotes(
+            industry_map={"600519": "白酒"}
+        )
 
     assert len(result) == 1
     item = result[0]
@@ -77,6 +96,27 @@ async def test_provider_list_stock_quotes_maps_columns():
     assert item.amount == 1_000_000_000
     assert item.turnover_rate == 0.5
     assert item.prev_close == 1790.0
+    assert item.main_net_inflow == 500_000_000
+    assert item.main_net_inflow_pct == 2.5
+    assert item.industry == "白酒"
+
+
+@pytest.mark.asyncio
+async def test_provider_list_stock_quotes_fund_flow_failure_tolerant():
+    """资金流接口失败时不阻断行情列表（主力资金字段为 None）。"""
+    df = pd.DataFrame(
+        [{"代码": "600519", "名称": "贵州茅台", "最新价": 1800.0, "涨跌幅": 0.56}]
+    )
+    provider = AkshareProvider()
+    with (
+        patch("akshare.stock_zh_a_spot_em", return_value=df),
+        patch("akshare.stock_individual_fund_flow_rank", side_effect=Exception("net")),
+    ):
+        result = await provider.list_stock_quotes()
+
+    assert len(result) == 1
+    assert result[0].main_net_inflow is None
+    assert result[0].main_net_inflow_pct is None
 
 
 @pytest.mark.asyncio

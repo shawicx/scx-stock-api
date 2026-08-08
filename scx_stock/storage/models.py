@@ -64,3 +64,19 @@ class MarketCalendarModel(Base):
 
     trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
     is_open: Mapped[bool] = mapped_column(default=True)
+
+
+class StockIndustryModel(Base):
+    """股票行业映射表，由 Scheduler 从板块成分股反查构建。
+
+    存 code → industry（行业板块名）的映射，供行情列表查询时零开销补充行业字段。
+    每日同步更新。
+    """
+
+    __tablename__ = "stock_industry"
+
+    code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    industry: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

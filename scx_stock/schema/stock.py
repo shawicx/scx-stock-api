@@ -142,6 +142,9 @@ class StockListItem(BaseModel):
     :param low: 最低价。
     :param open: 今开。
     :param prev_close: 昨收。
+    :param main_net_inflow: 主力净流入金额（元）。
+    :param main_net_inflow_pct: 主力净流入占比（%）。
+    :param industry: 所属行业（板块名，来自行业映射表）。
     """
 
     code: str
@@ -157,3 +160,6 @@ class StockListItem(BaseModel):
     low: float | None = None
     open: float | None = None
     prev_close: float | None = None
+    main_net_inflow: float | None = None
+    main_net_inflow_pct: float | None = None
+    industry: str | None = None

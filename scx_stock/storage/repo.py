@@ -10,7 +10,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from scx_stock.storage.db import get_session_factory
-from scx_stock.storage.models import StockModel
+from scx_stock.storage.models import StockIndustryModel, StockModel
 
 logger = logging.getLogger(__name__)
 
@@ -76,3 +76,41 @@ async def clear_all_stocks() -> int:
         result = await session.execute(delete(StockModel))
         await session.commit()
         return int(result.rowcount or 0)
+
+
+async def upsert_stock_industries(rows: Iterable[dict[str, Any]]) -> int:
+    """批量 upsert 股票行业映射（code → industry）。
+
+    :param rows: 字典迭代，需含 code / industry。
+    :returns: 写入条数。
+    """
+    rows = list(rows)
+    if not rows:
+        return 0
+
+    factory = get_session_factory()
+    async with factory() as session:
+        stmt = pg_insert(StockIndustryModel).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["code"], set_={"industry": stmt.excluded.industry}
+        )
+        await session.execute(stmt)
+        await session.commit()
+
+    logger.info("upserted %d stock industry rows", len(rows))
+    return len(rows)
+
+
+async def load_all_industries() -> dict[str, str]:
+    """全量加载 code → industry 映射，供行情列表零开销补充行业字段。
+
+    :returns: {code: industry} 字典；DB 不可用时返回空字典。
+    """
+    factory = get_session_factory()
+    try:
+        async with factory() as session:
+            result = await session.execute(select(StockIndustryModel))
+            return {row.code: row.industry for row in result.scalars().all()}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("load_all_industries failed: %s", e)
+        return {}

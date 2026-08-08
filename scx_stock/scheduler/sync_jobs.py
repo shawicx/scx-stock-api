@@ -141,12 +141,69 @@ async def rebuild_search_index() -> dict[str, int]:
     return {"index_size": size}
 
 
+async def sync_stock_industries() -> dict[str, int]:
+    """从行业板块成分股反查，构建 code → industry 映射并写入 DB。
+
+    流程：获取全部行业板块 → 逐个拉成分股 → 提取 code↔industry 行。
+    单个板块失败不影响整体，容错跳过。
+
+    :returns: {"industry_count": N}。
+    """
+    import time
+
+    import akshare as ak
+
+    provider = AkshareProvider()
+    t0 = time.time()
+
+    # 1. 获取全部行业板块
+    try:
+        sectors = await provider.list_sectors()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "sync_stock_industries fetch sectors failed in %.1fs: %s: %s",
+            time.time() - t0, type(e).__name__, str(e)[:200],
+        )
+        return {"industry_count": 0}
+
+    # 2. 逐板块拉成分股，提取 code → 行业映射
+    rows: list[dict[str, str]] = []
+    for sector in sectors:
+        try:
+            constituents = await provider.get_sector_constituents(sector.name)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("sync_stock_industries skip sector %s: %s", sector.name, e)
+            continue
+        for c in constituents:
+            code = c.get("code", "").strip()
+            if code:
+                rows.append({"code": code, "industry": sector.name})
+
+    if not rows:
+        logger.warning("sync_stock_industries got empty rows in %.1fs", time.time() - t0)
+        return {"industry_count": 0}
+
+    # 3. 写入 DB
+    try:
+        written = await repo.upsert_stock_industries(rows)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("sync_stock_industries db write failed: %s", e)
+        return {"industry_count": 0}
+
+    logger.info(
+        "sync_stock_industries done: %d mappings in %.1fs",
+        written, time.time() - t0,
+    )
+    return {"industry_count": written}
+
+
 async def sync_all() -> dict[str, int]:
-    """串行执行：股票列表 → ETF 列表 → 重建索引。
+    """串行执行：股票列表 → ETF 列表 → 行业映射 → 重建索引。
 
     :returns: 汇总计数。
     """
     r1 = await sync_stock_list()
     r2 = await sync_etf_list()
-    r3 = await rebuild_search_index()
-    return {**r1, **r2, **r3}
+    r3 = await sync_stock_industries()
+    r4 = await rebuild_search_index()
+    return {**r1, **r2, **r3, **r4}

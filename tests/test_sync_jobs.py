@@ -105,12 +105,59 @@ async def test_rebuild_search_index_loads_from_db():
 
 @pytest.mark.asyncio
 async def test_sync_all_chains_jobs():
-    """sync_all 串行执行三个任务并汇总。"""
+    """sync_all 串行执行四个任务并汇总。"""
     with (
         patch.object(sync_jobs, "sync_stock_list", new=AsyncMock(return_value={"stock_count": 2})),
         patch.object(sync_jobs, "sync_etf_list", new=AsyncMock(return_value={"etf_count": 3})),
+        patch.object(sync_jobs, "sync_stock_industries", new=AsyncMock(return_value={"industry_count": 10})),
         patch.object(sync_jobs, "rebuild_search_index", new=AsyncMock(return_value={"index_size": 5})),
     ):
         result = await sync_jobs.sync_all()
 
-    assert result == {"stock_count": 2, "etf_count": 3, "index_size": 5}
+    assert result == {
+        "stock_count": 2,
+        "etf_count": 3,
+        "industry_count": 10,
+        "index_size": 5,
+    }
+
+
+@pytest.mark.asyncio
+async def test_sync_stock_industries_writes_mappings():
+    """sync_stock_industries 从板块成分股反查，写入 code→industry 映射。"""
+    from scx_stock.schema.sector import SectorQuote
+
+    sectors = [SectorQuote(code="BK0477", name="白酒")]
+    constituents = [{"code": "600519", "name": "贵州茅台"}]
+
+    with (
+        patch.object(
+            sync_jobs.AkshareProvider,
+            "list_sectors",
+            new=AsyncMock(return_value=sectors),
+        ),
+        patch.object(
+            sync_jobs.AkshareProvider,
+            "get_sector_constituents",
+            new=AsyncMock(return_value=constituents),
+        ),
+        patch.object(sync_jobs.repo, "upsert_stock_industries", new=AsyncMock(return_value=1)) as m,
+    ):
+        result = await sync_jobs.sync_stock_industries()
+
+    assert result == {"industry_count": 1}
+    rows = m.await_args.args[0]
+    assert rows[0] == {"code": "600519", "industry": "白酒"}
+
+
+@pytest.mark.asyncio
+async def test_sync_stock_industries_handles_provider_error():
+    """list_sectors 失败时返回 0 且不抛异常。"""
+    with patch.object(
+        sync_jobs.AkshareProvider,
+        "list_sectors",
+        new=AsyncMock(side_effect=RuntimeError("network")),
+    ):
+        result = await sync_jobs.sync_stock_industries()
+
+    assert result == {"industry_count": 0}

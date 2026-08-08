@@ -31,7 +31,7 @@ async def list_stocks(
     ),
     sort_by: str = Query(
         "change_pct",
-        pattern="^(change_pct|amount|turnover_rate)$",
+        pattern="^(change_pct|amount|turnover_rate|main_net_inflow)$",
         description="排序字段",
     ),
     descending: bool = Query(True, description="是否降序"),

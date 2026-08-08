@@ -107,9 +107,18 @@ class AkshareProvider(SyncProviderBase):
 
         return self._df_to_stock_info(df, default_type="stock")
 
-    async def list_stock_quotes(self) -> list[StockListItem]:
-        """获取 A 股全市场实时行情列表（含价格/涨跌/换手等）。
+    async def list_stock_quotes(
+        self,
+        industry_map: dict[str, str] | None = None,
+    ) -> list[StockListItem]:
+        """获取 A 股全市场实时行情列表（含价格/涨跌/换手/主力资金/行业）。
 
+        数据来源（全部走线程池，不阻塞事件循环）：
+          - ``stock_zh_a_spot_em``：行情快照（价格/涨跌/换手等）
+          - ``stock_individual_fund_flow_rank("今日")``：全市场主力资金流排名
+          - ``industry_map``：由调用方注入的 code → 行业映射（来自 DB）
+
+        :param industry_map: code → 行业映射字典，为空则 industry 字段为 None。
         :returns: StockListItem 列表。
         :raises ProviderUnavailableError: 数据源不可用。
         """
@@ -119,22 +128,67 @@ class AkshareProvider(SyncProviderBase):
             logger.warning("akshare list_stock_quotes failed: %s", e)
             raise ProviderUnavailableError("akshare stock quote list unavailable") from e
 
-        return self._df_to_stock_quotes(df)
+        # 资金流排名（容错：失败则不 merge，主力资金字段为 None）
+        fund_flow_map = await self._fetch_fund_flow_rank()
 
-    def _df_to_stock_quotes(self, df: Any) -> list[StockListItem]:
+        # 行业映射由调用方注入（DB 来源），未注入则为空
+        if industry_map is None:
+            industry_map = {}
+
+        return self._df_to_stock_quotes(df, fund_flow_map, industry_map)
+
+    async def _fetch_fund_flow_rank(self) -> dict[str, dict[str, float]]:
+        """拉取全市场主力资金流排名，返回 code → {净额, 净占比} 映射。
+
+        容错：数据源失败时返回空字典，不阻断行情列表主链路。
+
+        :returns: {code: {"inflow": float, "inflow_pct": float}}。
+        """
+        try:
+            df = await self._run(ak.stock_individual_fund_flow_rank, indicator="今日")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("akshare fund flow rank failed: %s", e)
+            return {}
+
+        if df is None or df.empty:
+            return {}
+
+        out: dict[str, dict[str, float]] = {}
+        for _, r in df.iterrows():
+            code = str(r.get("代码", "")).strip()
+            if not code:
+                continue
+            out[code] = {
+                "inflow": _to_float(r.get("今日主力净流入-净额")) or 0.0,
+                "inflow_pct": _to_float(r.get("今日主力净流入-净占比")) or 0.0,
+            }
+        return out
+
+    def _df_to_stock_quotes(
+        self,
+        df: Any,
+        fund_flow_map: dict[str, dict[str, float]] | None = None,
+        industry_map: dict[str, str] | None = None,
+    ) -> list[StockListItem]:
         """把 A 股/ETF 快照 DataFrame 映射为 StockListItem 列表。
 
         :param df: AkShare 快照 DataFrame。
+        :param fund_flow_map: code → 主力资金流映射（可选）。
+        :param industry_map: code → 行业映射（可选）。
         :returns: StockListItem 列表。
         """
         if df is None or df.empty:
             return []
+
+        fund_flow_map = fund_flow_map or {}
+        industry_map = industry_map or {}
 
         out: list[StockListItem] = []
         for _, r in df.iterrows():
             code = str(r.get("代码", "")).strip()
             if not code:
                 continue
+            ff = fund_flow_map.get(code, {})
             out.append(
                 StockListItem(
                     code=code,
@@ -150,6 +204,9 @@ class AkshareProvider(SyncProviderBase):
                     low=_to_float(r.get("最低")),
                     open=_to_float(r.get("今开")),
                     prev_close=_to_float(r.get("昨收")),
+                    main_net_inflow=ff.get("inflow"),
+                    main_net_inflow_pct=ff.get("inflow_pct"),
+                    industry=industry_map.get(code),
                 )
             )
         return out
