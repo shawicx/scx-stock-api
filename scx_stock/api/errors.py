@@ -7,7 +7,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from scx_stock.exceptions.provider import ProviderError
-from scx_stock.exceptions.service import NotFoundError, ServiceError, ValidationError
+from scx_stock.exceptions.service import (
+    NotFoundError,
+    RateLimitExceededError,
+    ServiceError,
+    ValidationError,
+)
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -31,6 +36,14 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=400,
             content={"code": 40001, "message": str(exc), "data": None},
+        )
+
+    @app.exception_handler(RateLimitExceededError)
+    async def _rate_limit(_: Request, exc: RateLimitExceededError) -> JSONResponse:
+        return JSONResponse(
+            status_code=429,
+            content={"code": 42901, "message": str(exc), "data": None},
+            headers={"Retry-After": str(exc.retry_after)},
         )
 
     @app.exception_handler(RequestValidationError)

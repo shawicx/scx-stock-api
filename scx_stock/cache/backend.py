@@ -30,6 +30,18 @@ class CacheBackend:
         """
         raise NotImplementedError
 
+    async def incr(self, key: str, ttl: int) -> int:
+        """原子自增计数器，首次写入时设置过期。
+
+        限流场景使用：固定窗口计数器按 key 累加，TTL 略大于窗口长度
+        以确保跨窗口后键被清理。
+
+        :param key: 计数器键。
+        :param ttl: 过期时间（秒），仅在首次自增时生效。
+        :returns: 自增后的计数值（从 1 开始）。
+        """
+        raise NotImplementedError
+
     async def close(self) -> None:
         """释放连接资源。"""
         return None
@@ -52,6 +64,16 @@ class RedisCache(CacheBackend):
 
     async def set(self, key: str, value: Any, ttl: int) -> None:
         await self._client.set(key, json.dumps(value, ensure_ascii=False), ex=ttl)
+
+    async def incr(self, key: str, ttl: int) -> int:
+        # pipeline 保证 INCR 与 EXPIRE 原子提交；仅在首次（值为 1）时设置过期，
+        # 避免每次自增都刷新 TTL 导致窗口无法自然结束。
+        async with self._client.pipeline(transaction=True) as pipe:
+            count = await pipe.incr(key)
+            if count == 1:
+                await pipe.expire(key, ttl)
+            await pipe.execute()
+        return int(count)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -79,6 +101,19 @@ class MemoryCache(CacheBackend):
         import time
 
         self._store[key] = (value, time.time() + ttl)
+
+    async def incr(self, key: str, ttl: int) -> int:
+        import time
+
+        now = time.time()
+        item = self._store.get(key)
+        # asyncio 单线程下无需加锁；窗口过期则重置计数
+        if item is None or item[1] < now:
+            self._store[key] = (1, now + ttl)
+            return 1
+        count = item[0] + 1
+        self._store[key] = (count, item[1])
+        return count
 
     async def close(self) -> None:
         self._store.clear()

@@ -73,3 +73,13 @@ def index_list(group: str) -> str:
     :returns: 缓存键。
     """
     return f"{PREFIX}:index:list:{group}"
+
+
+def rate_limit(scope: str, identity: str) -> str:
+    """限流计数缓存键。
+
+    :param scope: 限流作用域（如 "ai"、"global"）。
+    :param identity: 客户端标识（通常为 IP 或 用户 ID，可含窗口后缀）。
+    :returns: 缓存键，如 scx:ratelimit:ai:1.2.3.4:202608060905。
+    """
+    return f"{PREFIX}:ratelimit:{scope}:{identity}"
