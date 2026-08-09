@@ -24,23 +24,14 @@ uv run uvicorn scx_stock.main:app --reload --port 8000
 后端已启用 CORS。默认允许以下前端开发源：
 
 ```
-http://localhost:3000
-http://127.0.0.1:3000
-http://localhost:5173
-http://127.0.0.1:5173
-http://localhost:8080
-http://127.0.0.1:8080
+http://localhost:3000 / http://127.0.0.1:3000
+http://localhost:5173 / http://127.0.0.1:5173
+http://localhost:6900 / http://127.0.0.1:6900
 ```
 
 **自定义源**：修改 `.env` 中的 `SCX_CORS_ORIGINS`（逗号分隔），设为 `*` 表示允许所有源（仅本地调试）。
 
-```bash
-# 例：允许 Vite 默认端口 + 自定义前端域名
-SCX_CORS_ORIGINS=http://localhost:5173,https://stock.example.com
-```
-
 > 注意：当 `SCX_CORS_ORIGINS=*` 时，后端会关闭 `allow_credentials`，前端无法携带 Cookie。
-> 需要携带凭证时，请显式列出源，不要用 `*`。
 
 ---
 
@@ -73,31 +64,6 @@ if (res.status >= 200 && res.status < 300 && res.data.code === 0) {
 }
 ```
 
-> HTTP 状态码同步保持语义（200/400/404/422/502/500），前端可二选一判断。
-
-### 错误响应示例
-
-参数校验失败（HTTP 422）：
-```json
-{
-  "code": 42201,
-  "message": "请求参数校验失败",
-  "data": [
-    { "loc": ["query", "q"], "msg": "ensure this value has at least 1 characters" }
-  ]
-}
-```
-
-资源不存在（HTTP 404）：
-```json
-{ "code": 40401, "message": "stock not found: 999999", "data": null }
-```
-
-数据源异常（HTTP 502）：
-```json
-{ "code": 50201, "message": "数据源异常: ...", "data": null }
-```
-
 ### 错误码对照
 
 | code | HTTP | 含义 |
@@ -106,14 +72,15 @@ if (res.status >= 200 && res.status < 300 && res.data.code === 0) {
 | 40001 | 400 | 业务校验失败 |
 | 40401 | 404 | 资源不存在 |
 | 42201 | 422 | 请求参数校验失败（FastAPI 自动） |
+| 42901 | 429 | 请求超限流（附 `Retry-After` 响应头，秒数） |
 | 50001 | 500 | 服务异常 |
 | 50201 | 502 | 数据源异常（上游不可用） |
+
+> 429 响应头含 `Retry-After: 60`，前端应据此做倒计时提示。
 
 ---
 
 ## 4. 可用接口
-
-完整契约见 `/docs`，核心接口如下。
 
 ### 4.1 股票/ETF 行情列表
 
@@ -125,9 +92,9 @@ GET /api/v1/stock/list
 |------|------|------|------|
 | `market` | query | `全部` | 市场板块：上证/深证/创业板/科创板/北交所/全部 |
 | `type` | query | `stock` | 证券类型：stock/etf/all |
-| `sort_by` | query | `change_pct` | 排序字段：change_pct/amount/turnover_rate |
+| `sort_by` | query | `change_pct` | 排序字段：change_pct/amount/turnover_rate/**main_net_inflow** |
 | `descending` | query | `true` | 是否降序 |
-| `page` | query | `1` | 页码（从 1 起） |
+| `page` | query | `1` | 页码（从 1 起，ge=1） |
 | `page_size` | query | `20` | 每页条数（1~100） |
 
 成功 `data`：
@@ -138,17 +105,18 @@ GET /api/v1/stock/list
       "code": "600519", "name": "贵州茅台", "market": "上证",
       "price": 1800.0, "change": 10.0, "change_pct": 0.56,
       "amount": 1000000000, "volume": 123456, "turnover_rate": 0.5,
-      "high": 1810.0, "low": 1785.0, "open": 1795.0, "prev_close": 1790.0
+      "high": 1810.0, "low": 1785.0, "open": 1795.0, "prev_close": 1790.0,
+      "main_net_inflow": 500000000, "main_net_inflow_pct": 2.5,
+      "industry": "白酒"
     }
   ],
-  "total": 5000, "page": 1, "page_size": 20
+  "total": 5400, "page": 1, "page_size": 100
 }
 ```
 
-> 限制：
-> - `type=etf` 时忽略 `market`（ETF 不按板块细分）。
-> - `market=北交所` 在当前数据源（`stock_zh_a_spot_em`）下可能返回空，属预期行为。
-> - 行情数据有 120 秒缓存，短时间内重复请求命中缓存。
+> - `main_net_inflow` / `main_net_inflow_pct` / `industry` 可能为 `null`（取决于数据源）
+> - 行情数据有 120 秒缓存
+> - **新源字段差异**：东方财富源字段最全；新浪源缺换手率/主力资金；腾讯源含换手率+主力资金但缺高低价
 
 ### 4.2 个股详情
 
@@ -163,22 +131,93 @@ GET /api/v1/stock/{code}
 成功 `data`：
 ```json
 {
-  "info": { "code": "600519", "name": "贵州茅台", "market": "上证", "industry": "..." },
+  "info": { "code": "600519", "name": "贵州茅台", "market": "上证", "industry": "白酒" },
   "quote": {
     "code": "600519", "name": "贵州茅台",
     "price": 1800.0, "prev_close": 1790.0,
     "change": 10.0, "change_pct": 0.56,
     "volume": 123456, "amount": 1000000,
     "high": 1810.0, "low": 1785.0, "open": 1795.0,
-    "timestamp": "2026-07-25T10:00:00"
+    "timestamp": "2026-08-09T10:00:00"
   },
-  "fetched_at": "2026-07-25T10:00:00"
+  "fetched_at": "2026-08-09T10:00:00"
 }
 ```
 
-> 限制：当前仅支持 A 股个股代码。ETF / 美股 / 港股由其他端点提供（待实现）。
+> 仅支持 A 股个股代码。ETF 详情待实现。
 
-### 4.3 搜索
+### 4.3 板块涨跌排行
+
+```
+GET /api/v1/sector/list
+```
+
+| 参数 | 位置 | 默认 | 说明 |
+|------|------|------|------|
+| `sort_by` | query | `change_pct` | 排序：change_pct/turnover_rate/total_market_cap |
+| `descending` | query | `true` | 是否降序 |
+| `limit` | query | `50` | 最大返回数（1~200） |
+
+成功 `data`：
+```json
+[
+  {
+    "code": "BK0477", "name": "白酒",
+    "price": null, "change": 1.2, "change_pct": 0.56,
+    "total_market_cap": null, "turnover_rate": 1.5,
+    "up_count": 10, "down_count": 3,
+    "leading_stock": "贵州茅台", "leading_stock_change_pct": 2.1
+  }
+]
+```
+
+### 4.4 板块详情
+
+```
+GET /api/v1/sector/{name}
+```
+
+| 参数 | 位置 | 说明 |
+|------|------|------|
+| `name` | path | 板块名称（如 `白酒`、`小金属`） |
+
+成功 `data`：
+```json
+{
+  "quote": { ... },   // 同 4.3 单条 SectorQuote
+  "constituents": [
+    { "code": "600519", "name": "贵州茅台" },
+    { "code": "000858", "name": "五粮液" }
+  ]
+}
+```
+
+### 4.5 大盘指数
+
+```
+GET /api/v1/market/index          # 主要指数（白名单 8 个）
+GET /api/v1/market/index/all      # 全部指数（按分组）
+```
+
+| 参数 | 位置 | 默认 | 说明 |
+|------|------|------|------|
+| `group` | query | `沪深重要指数` | 仅 `/all` 使用：沪深重要/上证系列/深证系列/指数成份/中证系列 |
+
+主要指数白名单：上证指数、深证成指、创业板指、科创50、北证50、沪深300、中证500、中证1000
+
+成功 `data`：
+```json
+[
+  {
+    "code": "000001", "name": "上证指数",
+    "price": 3200.0, "change_pct": 0.56, "change": 17.8,
+    "volume": null, "amount": null, "amplitude": 0.8,
+    "high": 3210.0, "low": 3180.0, "open": 3190.0, "prev_close": 3182.2
+  }
+]
+```
+
+### 4.6 搜索
 
 ```
 GET /api/v1/search?q={keyword}&limit={limit}
@@ -186,54 +225,31 @@ GET /api/v1/search?q={keyword}&limit={limit}
 
 | 参数 | 位置 | 默认 | 说明 |
 |------|------|------|------|
-| `q` | query | 必填 | 关键词（代码 / 简称 / 拼音首字母） |
+| `q` | query | 必填 | 关键词（代码 / 简称 / 拼音首字母），min_length=1 |
 | `limit` | query | 20 | 最大返回数（1~100） |
 
 成功 `data`（按相关度降序）：
 ```json
 [
-  { "code": "600519", "name": "贵州茅台", "market": "上证", "type": "stock", "score": 100 },
-  { "code": "510300", "name": "沪深300ETF", "market": "上证", "type": "etf", "score": 80 }
+  { "code": "600519", "name": "贵州茅台", "market": "上证", "type": "stock", "score": 100 }
 ]
 ```
 
-搜索维度：
-- 精确代码（`600519`）
-- 简称包含（`茅台`）
-- 拼音全拼（`guizhou`）
-- 拼音首字母（`gzmt`）
+搜索维度：精确代码（100）→ 简称包含（80）→ 拼音全拼（60/50）→ 拼音首字母（40/30）
 
-> 注：搜索依赖内存索引，索引由定时任务每日 09:00 构建。索引为空时返回 `[]`，
-> 可调用 `POST /admin/sync` 手动触发首次同步。
+> 索引由定时任务每日 09:20 构建。索引为空时返回 `[]`，可调用 `POST /admin/sync` 手动触发。
 
-### 4.4 索引大小（运维）
-
-```
-GET /api/v1/search/index-size
-```
-
-### 4.5 健康检查
+### 4.7 健康检查
 
 ```
 GET /health          存活探针（进程在跑即 ok）
 GET /health/ready    就绪探针（检查缓存 / DB 依赖）
 ```
 
-就绪探针 `data`：
-```json
-{
-  "status": "ok",
-  "checks": {
-    "cache": "ok",
-    "db": "ok (5234 rows)"
-  }
-}
-```
-
-### 4.6 运维端点
+### 4.8 运维端点
 
 ```
-POST /admin/sync       手动触发：股票列表 → ETF 列表 → 重建索引
+POST /admin/sync       手动触发：股票 → ETF → 行业映射 → 重建索引
 POST /admin/reindex    仅从 DB 重建搜索索引
 ```
 
@@ -243,10 +259,10 @@ POST /admin/reindex    仅从 DB 重建搜索索引
 
 ### 5.1 开发流程
 
-1. **先调通健康检查**：`GET /health/ready` 确认后端依赖正常
-2. **首次同步索引**：`POST /admin/sync`（DB 就绪后），让搜索可用
-3. **验证搜索**：`GET /api/v1/search?q=600519`
-4. **验证个股**：`GET /api/v1/stock/600519`
+1. `GET /health/ready` 确认后端依赖正常
+2. `POST /admin/sync` 首次同步（DB 就绪后），让搜索可用
+3. `GET /api/v1/search?q=600519` 验证搜索
+4. `GET /api/v1/stock/list?page=1&page_size=5` 验证行情
 
 ### 5.2 axios 封装示例
 
@@ -255,7 +271,7 @@ import axios from 'axios'
 
 const api = axios.create({ baseURL: 'http://localhost:8000', timeout: 10000 })
 
-// 统一响应拦截
+// 统一响应拦截：解包 data
 api.interceptors.response.use(
   (res) => {
     if (res.data.code === 0) return res.data.data   // 成功直接返回 data
@@ -267,33 +283,33 @@ api.interceptors.response.use(
   }
 )
 
-// 使用
+// 使用（已解包，无需 .data.data）
 const detail = await api.get('/api/v1/stock/600519')
-// detail 即响应中的 data 字段，无需再 .data.data
 ```
 
 ### 5.3 注意事项
 
-- **个股端点仅支持 A 股**：代码正则 `^[0368]\d{4,5}$`，其他格式返回 40001
-- **搜索为空不报错**：索引未构建时返回 `{code:0, data:[]}`，需先同步
-- **实时行情有缓存**：30 秒 TTL，同一代码短时间重复请求会命中缓存
-- **数据源不稳定**：AkShare 底层抓东方财富，可能因网络波动返回 50201，前端建议重试 1~2 次
+- **个股端点仅支持 A 股**：代码正则 `^[0368]\d{4,5}$`
+- **搜索为空不报错**：索引未构建时返回 `{code:0, data:[]}`
+- **实时行情有缓存**：列表 120s / 个股 30s TTL
+- **数据源不稳定**：后端有多源 fallback（东方财富→新浪→腾讯），但仍可能返回 50201，建议前端重试 1~2 次
+- **限流**：未来 AI 端点会有 429，需读 `Retry-After` 头做倒计时
 
 ---
 
-## 6. 当前 API 覆盖范围
+## 6. API 覆盖范围
 
 | 能力 | 状态 | 端点 |
 |------|------|------|
 | 股票/ETF 行情列表 | ✅ | `GET /api/v1/stock/list` |
 | A 股个股详情 | ✅ | `GET /api/v1/stock/{code}` |
+| 板块涨跌排行 | ✅ | `GET /api/v1/sector/list` |
+| 板块详情（成分股） | ✅ | `GET /api/v1/sector/{name}` |
+| 大盘指数 | ✅ | `GET /api/v1/market/index` |
 | 搜索（代码/简称/拼音） | ✅ | `GET /api/v1/search` |
 | 健康检查 | ✅ | `GET /health`、`GET /health/ready` |
 | 运维同步 | ✅ | `POST /admin/sync`、`POST /admin/reindex` |
 | ETF 详情 | ⏳ 待实现 | — |
-| 板块涨跌 | ⏳ 待实现 | — |
-| 主力资金 | ⏳ 待实现 | — |
-| 大盘指数 | ⏳ 待实现 | — |
+| 主力资金独立端点 | ⏳ 待实现 | — |
+| K 线 | ⏳ 待实现 | — |
 | AI 分析 | ⏳ 待实现 | — |
-
-待实现端点上线后契约保持一致（统一 `{code, message, data}` 格式）。

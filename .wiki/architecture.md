@@ -1,483 +1,321 @@
-# 架构设计文档
+# 架构文档
 
-> 项目：scx-stock-api（股票行情 / AI 分析后端）
-> 技术栈：Python 3.13 + uv + FastAPI + AkShare + Redis + APScheduler
-> 状态：设计稿（待实现）
-
----
-
-## 1. 设计目标
-
-提供一个统一的股票行情中台后端，满足以下需求：
-
-1. 查看当天股市信息（板块涨跌、个股涨跌、主力资金）
-2. 数据源可配置、可切换
-3. 支持多市场（上证、深证、创业板、科创板、北交所、港股、美股、指数）
-4. 代码 / 简称 / 拼音搜索股票与 ETF
-5. 接入大模型，对 ETF / 个股 / 板块 / 大盘做 AI 分析
+> 项目：scx-stock-api（股票行情后端）
+> 状态：**已实现**（本文档基于实际代码，非设计稿）
 
 ---
 
-## 2. 分层总览
+## 1. 项目定位
+
+统一的股票行情中台后端，提供：
+
+- A 股 / ETF 实时行情（价格、涨跌、换手、主力资金）
+- 行业板块涨跌排行与详情
+- 大盘指数（上证、深证、创业板等）
+- 代码 / 简称 / 拼音搜索
+- 行业映射（板块成分股反查）
+
+配套前端：[scx-gold](https://github.com/shawicx/scx-gold)（React 涨停候选筛选器）。
+
+---
+
+## 2. 技术栈
+
+| 层面 | 选型 |
+|------|------|
+| 语言 | Python 3.13+（`requires-python = ">=3.13"`） |
+| Web 框架 | FastAPI ≥0.115 + Uvicorn |
+| 数据源 | AkShare ≥1.14（东方财富 / 新浪 / 腾讯多源 fallback） |
+| ORM | SQLAlchemy 2.0（async）+ asyncpg |
+| 数据库 | PostgreSQL 16（开发期自动建库） |
+| 缓存 | Redis ≥5.0（无 Redis 时回退内存缓存） |
+| 调度 | APScheduler ≥3.10（AsyncIOScheduler） |
+| 配置 | pydantic-settings ≥2.0（环境变量 + .env） |
+| 拼音 | pypinyin ≥0.51 |
+| 包管理 | uv（锁文件 `uv.lock`） |
+| 构建 | hatchling |
+
+---
+
+## 3. 分层总览
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│ API Layer         参数校验 → 调 Service → 返回 JSON           │
+│ API Layer（api/v1/）  参数校验 → 调 Service → 返回 JSON       │
 ├─────────────────────────────────────────────────────────────┤
-│ Service Layer     业务编排：聚合多个 domain，不感知数据源       │
+│ Middleware（middleware/）  限流（固定窗口计数器）              │
 ├─────────────────────────────────────────────────────────────┤
-│ Repository Layer  ★ 选源 / 熔断 / 降级 / 缓存命中判断           │
+│ Service Layer（service/）  业务编排：聚合多 domain            │
 ├─────────────────────────────────────────────────────────────┤
-│ Provider Layer    按领域接口实现：AkShare / EastMoney / ...    │
+│ Repository Layer（repository/）  缓存命中判断 → 调 Provider    │
 ├─────────────────────────────────────────────────────────────┤
-│ Source            AkShare、东方财富、Yahoo、Alpha Vantage ...   │
+│ Provider Layer（provider/）  AkShare 多源 fallback            │
+├─────────────────────────────────────────────────────────────┤
+│ Storage（DB）+ Cache（Redis）  慢变落库 / 快变缓存             │
 └─────────────────────────────────────────────────────────────┘
 
 旁路：
-  Storage（DB）   ← 慢变数据落库（K 线 / 列表 / 财务）
-  Cache（Redis）  ← 快变数据短 TTL（行情 / 板块 / 资金流）
-  Scheduler       ← 定时预热，写入 Storage / Cache
-  Search Index    ← 定时全量构建，毫秒级检索
-  LLM Client      ← Function Calling，模型自主决定何时拉数据
+  Scheduler（scheduler/）  定时预热：股票/ETF/行业映射/搜索索引
+  Search Index（search/）   内存索引（Trie 打分，毫秒级检索）
 ```
 
 ### 各层职责
 
-| 层 | 职责 | 不允许做的事 |
-|----|------|------------|
-| API | 参数校验、调用 Service、返回 JSON | 不含业务逻辑、不直接调 Provider |
-| Service | 业务编排、聚合多 domain | 不感知数据源存在、不写 SQL |
-| Repository | 选源、熔断、降级、缓存命中判断 | 不做业务聚合 |
-| Provider | 调用具体数据源、做 async 包装 | 不做选源、不做缓存策略 |
-| Storage | ORM、DB 读写 | 不调外部数据源 |
-| Cache | key 规则、TTL、缓存装饰器 | 不做业务判断 |
+| 层 | 目录 | 职责 | 不允许做的事 |
+|----|------|------|------------|
+| API | `api/v1/` | 参数校验、调 Service、返回 `ok(data)` | 不含业务逻辑、不直接调 Provider |
+| Service | `service/` | 业务编排（过滤/排序/分页） | 不感知数据源、不写 SQL |
+| Repository | `repository/` | 缓存命中判断、调 Provider | 不做业务聚合 |
+| Provider | `provider/` | AkShare 调用（多源 fallback） | 不做缓存策略 |
+| Storage | `storage/` | ORM 读写 | 不调外部数据源 |
+| Cache | `cache/` | Redis/内存双实现 | 不做业务判断 |
 
 ---
 
-## 3. 目录结构
+## 4. 目录结构
 
 ```text
-backend/
-├── scx_stock/                      # 主包（避免 app 包名冲突）
-│   ├── api/                        # API 层
-│   │   ├── v1/
-│   │   │   ├── market.py           # 大盘 / 指数
-│   │   │   ├── stock.py            # 个股
-│   │   │   ├── etf.py              # ETF
-│   │   │   ├── sector.py           # 板块
-│   │   │   ├── search.py           # 搜索
-│   │   │   ├── fund_flow.py        # 主力资金
-│   │   │   └── ai.py               # AI 分析
-│   │   ├── deps.py                 # 依赖注入（Repository / Cache → Service）
-│   │   ├── errors.py               # 异常 → HTTP 统一转换
-│   │   └── router.py
-│   │
-│   ├── service/                    # 业务编排层
-│   │   ├── market_service.py
-│   │   ├── stock_service.py
-│   │   ├── etf_service.py
-│   │   ├── sector_service.py
-│   │   ├── search_service.py
-│   │   ├── fund_flow_service.py
-│   │   └── ai_service.py
-│   │
-│   ├── repository/                 # ★ 选源 / 熔断 / 降级 / 缓存编排
-│   │   ├── router.py               # 按 (domain, market) 路由到 provider
-│   │   ├── fallback.py             # 主备切换、failover
-│   │   └── base.py
-│   │
-│   ├── provider/                   # 数据源抽象（按领域拆接口）
-│   │   ├── contracts.py            # StockProvider / EtfProvider / ... 接口定义
-│   │   ├── base.py                 # 强制 to_thread 包装同步库
-│   │   ├── akshare_provider.py
-│   │   ├── eastmoney_provider.py
-│   │   ├── tushare_provider.py
-│   │   ├── yahoo_provider.py
-│   │   └── alpha_vantage_provider.py
-│   │
-│   ├── storage/                    # 持久化层（慢变数据落库）
-│   │   ├── db.py
-│   │   ├── models.py               # ORM：股票/ETF 列表、K 线、财务
-│   │   └── repo.py
-│   │
-│   ├── search/                     # 搜索索引构建
-│   │   ├── index.py                # Trie / 倒排，定时构建
-│   │   └── pinyin.py
-│   │
-│   ├── llm/
-│   │   ├── client.py               # 多模型切换
-│   │   ├── prompt.py
-│   │   ├── analyzer.py             # 编排对话、决定何时调 tool
-│   │   └── tools.py                # 把 Provider 能力包成 tool schema
-│   │
-│   ├── cache/
-│   │   ├── backend.py              # redis / memory 后端
-│   │   ├── decorators.py           # @cached(ttl=60) 策略载体
-│   │   └── keys.py                 # key 命名规则集中
-│   │
-│   ├── schema/                     # Pydantic 请求 / 响应结构（避免 model 命名歧义）
-│   │   ├── market.py
-│   │   ├── stock.py
-│   │   ├── etf.py
-│   │   ├── sector.py
-│   │   └── ai.py
-│   │
-│   ├── exceptions/                 # 异常分层
-│   │   ├── provider.py             # ProviderError（超时 / 限流 / 源不可用）
-│   │   └── service.py              # ServiceError（代码不存在 / 数据缺失）
-│   │
-│   ├── middleware/                 # 日志 / 限流 / 耗时
-│   │   ├── logging.py
-│   │   └── ratelimit.py
-│   │
-│   ├── scheduler/                  # 后台定时同步
-│   │   ├── market_sync.py
-│   │   ├── fund_flow_sync.py
-│   │   └── search_index_sync.py
-│   │
-│   ├── config/
-│   │   ├── settings.py
-│   │   └── datasource.py           # 主备源、能力声明（supports）
-│   │
-│   └── main.py
+scx_stock/
+├── api/                        # API 层
+│   ├── v1/
+│   │   ├── stock.py            # GET /stock/list、GET /stock/{code}
+│   │   ├── search.py           # GET /search、GET /search/index-size
+│   │   ├── sector.py           # GET /sector/list、GET /sector/{name}
+│   │   └── market.py           # GET /market/index、GET /market/index/all
+│   ├── deps.py                 # 依赖注入（Service / Cache）
+│   ├── errors.py               # 全局异常 → 统一 JSON
+│   └── router.py               # v1 路由聚合（前缀 /api/v1）
 │
-├── tests/
-├── pyproject.toml
-├── uv.lock
-└── README.md
+├── service/                    # 业务编排层
+│   ├── stock_service.py        # 行情列表（过滤+排序+分页）、个股详情
+│   ├── search_service.py       # 搜索
+│   ├── sector_service.py       # 板块排行+详情
+│   └── index_service.py        # 大盘指数
+│
+├── repository/                 # 缓存 + Provider 编排
+│   ├── router.py               # StockRepository（行情/详情）
+│   ├── sector_repo.py          # SectorRepository（板块）
+│   └── index_repo.py           # IndexRepository（指数）
+│
+├── provider/                   # 数据源抽象
+│   ├── contracts.py            # Protocol 接口（StockProvider 等）
+│   ├── base.py                 # SyncProviderBase + UA 注入 + 代理绕过
+│   └── akshare_provider.py     # AkShare 多源 fallback 实现
+│
+├── storage/                    # 持久化
+│   ├── db.py                   # 异步引擎/会话/自动建库
+│   ├── models.py               # ORM：stock / kline / market_calendar / stock_industry
+│   └── repo.py                 # 批量 upsert / 全量加载
+│
+├── cache/
+│   ├── backend.py              # CacheBackend 抽象 + RedisCache + MemoryCache
+│   └── keys.py                 # 缓存键命名规则（PREFIX = "scx"）
+│
+├── search/                     # 搜索索引（内存）
+│   ├── index.py（在 __init__.py）  # SearchIndex（打分/前缀/线程安全）
+│   └── pinyin.py               # 拼音转换（pypinyin）
+│
+├── schema/                     # Pydantic 响应模型
+│   ├── common.py               # ApiResponse / PageData / HealthStatus / ok() / fail()
+│   ├── stock.py                # StockListItem / StockInfo / Quote / StockDetailResponse
+│   ├── sector.py               # SectorQuote / SectorDetail
+│   └── index.py                # IndexQuote（在 __init__.py）
+│
+├── exceptions/                 # 异常分层
+│   ├── provider.py             # ProviderError / ProviderUnavailableError / ...
+│   └── service.py              # ServiceError / NotFoundError / ValidationError / RateLimitExceededError
+│
+├── middleware/
+│   └── rate_limit.py           # 限流（固定窗口，get_client_ip + check_rate_limit + ai_rate_limit）
+│
+├── scheduler/
+│   ├── runner.py               # APScheduler 封装 + 调度计划
+│   └── sync_jobs.py            # 4 个同步任务
+│
+├── config/
+│   ├── settings.py             # 全局配置（环境变量前缀 SCX_）
+│   └── datasource.py           # 数据源能力声明表
+│
+├── llm/                        # LLM/AI 分析（预留，未实现）
+│
+└── main.py                     # FastAPI 入口（lifespan + CORS + 异常 + 健康 + 运维 + 路由）
 ```
 
 ---
 
-## 4. 关键工程约束（动工前必须钉死）
+## 5. 多数据源 Fallback 机制（核心）
 
-### 4.1 AkShare 同步库必须 async 包装
+**背景**：AkShare 底层调用东方财富 `push2.eastmoney.com`，该域名在云服务器（阿里云 ECS）IP 段被反爬封锁（`RemoteDisconnected`）。通过多源 fallback 保证可用性。
 
-AkShare 内部使用同步 `requests`，在 FastAPI async 环境中直接调用会阻塞整个事件循环。
-所有 Provider 必须继承统一基类，对外暴露 `async def`，内部走线程池。
+### 5.1 `_call_with_fallback` 工作原理
+
+`AkshareProvider._call_with_fallback(sources, domain)` 按优先级尝试多个数据源函数，第一个成功就返回 `(源名, DataFrame)`：
 
 ```python
-# scx_stock/provider/base.py
-from anyio import to_thread
-
-
-class SyncProviderBase:
-    """同步数据源基类，强制走线程池，对外暴露 async。"""
-
-    async def _run(self, func, *args, **kwargs):
-        return await to_thread.run_sync(lambda: func(*args, **kwargs))
+sources = [
+    ("em",   ak.stock_zh_a_spot_em, {}),    # 东方财富（字段全）
+    ("sina", ak.stock_zh_a_spot,    {}),    # 新浪（字段少但云可用）
+    ("tx",   ak.stock_zh_a_spot_tx, {}),    # 腾讯（含换手率+主力资金）
+]
+source, df = await self._call_with_fallback(sources, domain="list_stock_quotes")
 ```
 
-### 4.2 持久化策略表
+### 5.2 各领域的 fallback 链
 
-| 数据 | 变化速度 | 存储 | TTL / 更新 |
-|------|---------|------|-----------|
-| 实时行情（价格 / 涨跌） | 秒级 | Redis | 30~60s |
-| 板块涨跌 | 分钟级 | Redis | 1~5min |
-| 主力资金流 | 分钟级 | Redis | 1~5min |
-| 搜索结果 | 分钟级 | Redis | 5min |
-| 股票 / ETF 列表 | 日级 | **DB + Redis** | 每日 09:00 同步 |
-| 历史 K 线 | 日级（收盘后） | **DB** | 收盘后增量 |
-| 财务数据 | 季度级 | **DB** | 季报后同步 |
+| 方法 | 主源 | 备选 1 | 备选 2 | 备注 |
+|------|------|--------|--------|------|
+| `list_stock_quotes` | 东方财富 `_em` | 新浪 `stock_zh_a_spot` | 腾讯 `stock_zh_a_spot_tx` | 腾讯含主力资金 `zljlr` |
+| `get_quote` | 东方财富 `_em` | 新浪 | 腾讯 | 腾讯代码格式 `sh600519` |
+| `list_stocks` | 东方财富 `_em` | 新浪 | 腾讯 | 搜索索引用 |
+| `list_etfs` / `list_etf_quotes` | 东方财富 `fund_etf_spot_em` | 同花顺 `fund_etf_spot_ths` | — | |
+| `list_sectors` | 东方财富 `stock_board_industry_name_em` | 新浪 `stock_sector_spot` | — | |
+| `list_indexes` | 东方财富 `stock_zh_index_spot_em` | 新浪 `stock_zh_index_spot_sina` | — | |
+| `get_stock` | 东方财富 `stock_individual_info_em` | — | — | 仅东方财富 |
+| `get_sector_constituents` | 东方财富 `stock_board_industry_cons_em` | — | — | 仅东方财富（Scheduler 用） |
 
-### 4.3 异常分层
+### 5.3 腾讯源列名映射
 
-```text
-ProviderError（超时 / 限流 / 源不可用）  ─┐
-                                          ├─→ FastAPI exception_handler → JSON
-ServiceError（代码不存在 / 数据缺失）     ─┘
-```
+腾讯源列名是拼音缩写（与东方财富/新浪的中文列名完全不同），有独立映射函数：
 
-Provider 抛 `ProviderError`，Service 转译为 `ServiceError`，API 层 `errors.py` 统一映射为 HTTP 状态码与 JSON 响应。
+| 腾讯列名 | 含义 | 映射到 |
+|---------|------|--------|
+| `code` | `sh600519` 格式 | 标准代码（去前缀） |
+| `name` | 名称 | name |
+| `zxj` | 最新价 | price |
+| `zdf` | 涨跌幅 | change_pct |
+| `zd` | 涨跌额 | change |
+| `volume` / `turnover` | 成交量 / 成交额 | volume / amount |
+| `hsl` | 换手率 | turnover_rate |
+| `zljlr` | 主力净流入（**万元**） | main_net_inflow（× 1e4 转元） |
 
-### 4.4 数据流（读写分离）
+### 5.4 Provider 层 monkey-patch（`provider/base.py`）
 
-读路径：
-```text
-API → Service → 查 Redis（命中返回）
-                 未命中 → Repository → Provider → 写 Redis → 返回
-```
-
-写路径（Scheduler 预热）：
-```text
-Scheduler → Service → Provider → 写 Storage(DB) / Cache(Redis)
-```
+模块加载时对 `requests.Session.request` 打补丁：
+1. **注入浏览器 User-Agent**：东方财富会拒绝无 UA 的请求
+2. **国内数据源绕过代理**：`push2.eastmoney.com` 等域名设 `proxies={}` 直连，避免代理 SSL 干扰
 
 ---
 
-## 5. Provider 接口设计（按领域拆分）
+## 6. 数据库 Schema
 
-原设计把所有方法塞进单一 `MarketProvider`，导致 Yahoo / Alpha Vantage 等只能 `raise NotImplementedError`。
-按领域拆接口，每个 Provider 只实现自己能做的领域。
+### 6.1 ORM 模型（`storage/models.py`）
 
-### 5.1 领域接口
+| 表名 | 用途 | 主要字段 | 数据状态 |
+|------|------|---------|---------|
+| `stock` | 股票/ETF 基础信息 | code(PK), name, market, pinyin, type(PK), updated_at；唯一约束 (code, type) | ✅ Scheduler 每日同步 |
+| `stock_industry` | 行业映射 | code(PK), industry, updated_at | ✅ Scheduler 每日同步 |
+| `kline` | 历史 K 线 | id(PK), code, trade_date, ohlcv；唯一约束 (code, trade_date) | ⏳ 表已定义，无数据写入 |
+| `market_calendar` | 交易日历 | trade_date(PK), is_open | ⏳ 表已定义，无数据写入 |
 
+### 6.2 自动建库
+
+`storage/db.py` 的 `init_db()` 在应用启动时（lifespan）执行：
+- 连接维护库（postgres），检查目标库是否存在
+- 不存在则创建（`SCX_DB_AUTO_CREATE=true` 时，开发期便利）
+- `Base.metadata.create_all` 自动建表
+
+### 6.3 持久化策略
+
+| 数据 | 变化速度 | 存储 | TTL |
+|------|---------|------|-----|
+| 实时行情 | 秒级 | Redis | 30s（个股）/ 120s（列表） |
+| 板块/指数 | 分钟级 | Redis | 120s |
+| 搜索结果 | 分钟级 | Redis | 60s |
+| 股票/ETF 列表 | 日级 | DB + Redis | 每日 09:00 同步 |
+| 行业映射 | 日级 | DB | 每日 09:15 同步 |
+
+---
+
+## 7. 搜索设计
+
+### 7.1 流程
+
+```text
+Scheduler 每日 09:20 → 从 DB 全量加载 → search/index.py 构建内存索引
+                                        ↓
+搜索请求 → SearchIndex.search(keyword) → 毫秒级返回
+```
+
+### 7.2 支持的匹配维度
+
+- 精确代码：`510300`（score 100）
+- 简称包含：`茅台`（score 80）
+- 拼音全拼：`guizhou`（score 60/50）
+- 拼音首字母：`gzmt`（score 40/30）
+
+---
+
+## 8. 限流设计
+
+`middleware/rate_limit.py` 实现端点级限流：
+
+- **算法**：固定窗口计数器（按分钟）
+- **存储**：复用 `CacheBackend.incr`（Redis `INCR`+`EXPIRE` / Memory 字典）
+- **标识**：客户端 IP（`X-Forwarded-For` → `X-Real-IP` → `request.client.host`）
+- **命中**：抛 `RateLimitExceededError` → 429 + code 42901 + `Retry-After` 头
+- **配置**：`SCX_AI_RATE_LIMIT_PER_MINUTE`（默认 20，为 AI 端点预留）
+
+使用方式（未来 AI 端点）：
 ```python
-# scx_stock/provider/contracts.py
-class StockProvider(Protocol):
-    async def get_stock(self, code: str) -> StockInfo: ...
-    async def get_stock_quote(self, code: str) -> Quote: ...
-
-class EtfProvider(Protocol):
-    async def get_etf(self, code: str) -> EtfInfo: ...
-
-class SectorProvider(Protocol):
-    async def get_sector_list(self) -> list[SectorInfo]: ...
-    async def get_sector(self, code: str) -> SectorDetail: ...
-
-class FundFlowProvider(Protocol):
-    async def get_fund_flow(self, code: str) -> FundFlow: ...
-    async def get_market_fund_flow(self) -> MarketFundFlow: ...
-
-class IndexProvider(Protocol):
-    async def get_index(self, code: str) -> IndexQuote: ...
-
-class SearchProvider(Protocol):
-    async def search(self, keyword: str) -> list[SearchResult]: ...
-```
-
-### 5.2 能力声明
-
-```python
-# scx_stock/config/datasource.py
-akshare_supports = supports(
-    markets=["A股", "港股", "指数"],
-    domains=["stock", "etf", "sector", "fund_flow", "index"],
-)
-
-yahoo_supports = supports(
-    markets=["美股", "港股", "指数"],
-    domains=["stock", "etf", "index"],
-)
-
-alpha_vantage_supports = supports(
-    markets=["美股", "外汇"],
-    domains=["stock", "forex"],
-)
-```
-
-### 5.3 Repository 路由
-
-`router.py` 按 `(market, domain)` 选主源；主源失败由 `fallback.py` 切备源。
-
-```text
-请求 (domain=stock, market=美股, code=AAPL)
-  ↓
-router 查能力表 → 主源 Yahoo
-  ↓
-Yahoo 超时 → fallback → Alpha Vantage
-  ↓
-返回结果
+@router.post("/analyze")
+async def analyze(_=Depends(ai_rate_limit())):
+    ...
 ```
 
 ---
 
-## 6. 数据源清单
+## 9. 定时同步（Scheduler）
 
-### 6.1 主备选择
+### 9.1 调度计划（`scheduler/runner.py`，时区 Asia/Shanghai）
 
-| 数据 | 首选 | 备用 |
-|------|------|------|
-| A 股行情 | AkShare | 东方财富 |
-| ETF | AkShare | 东方财富 |
-| 板块 | AkShare | 东方财富 |
-| 主力资金 | AkShare | 东方财富 |
-| 财务数据 | AkShare | TuShare（Pro） |
-| 美股 | Yahoo Finance | Alpha Vantage / Finnhub |
-| 港股 | AkShare | Yahoo Finance |
-| 外汇 | Alpha Vantage | Twelve Data |
-| 指数 | AkShare | Yahoo Finance |
+| 任务 | Cron（周一至五） | 说明 |
+|------|:---:|------|
+| `sync_stock_list` | `0 9 * * 1-5` | 实际调 `sync_all`（串行：股票+ETF+行业+索引） |
+| `sync_etf_list` | `10 9 * * 1-5` | ETF 列表 |
+| `sync_stock_industries` | `15 9 * * 1-5` | 行业映射（板块成分股反查） |
+| `rebuild_search_index` | `20 9 * * 1-5` | 重建内存搜索索引 |
 
-### 6.2 公开数据源能力对比
+### 9.2 容错
 
-| 数据源 | A 股 | ETF | 港股 | 美股 | 指数 | 外汇 | 费用 | 接入方式 |
-|--------|------|-----|------|------|------|------|------|---------|
-| **AkShare** | ✅ | ✅ | ✅ | ✅ | ✅ | 部分 | 免费 | Python 库（首选） |
-| **东方财富** | ✅ | ✅ | ✅ | 部分 | ✅ | ✗ | 免费（非官方接口） | HTTP |
-| 新浪财经 | ✅ | ✅ | ✅ | 部分 | ✅ | ✗ | 免费（非官方接口） | HTTP |
-| 腾讯财经 | ✅ | ✅ | ✅ | 部分 | ✅ | ✗ | 免费（非官方接口） | HTTP |
-| **TuShare** | ✅ | ✅ | 部分 | ✗ | ✅ | ✗ | 基础免费 / Pro 积分 | Token |
-| **Yahoo Finance** | 部分 | ✅ | ✅ | ✅ | ✅ | ✅ | 免费（非官方接口） | `yfinance` 库 |
-| **Alpha Vantage** | 部分 | ETF | ✅ | ✅ | ✅ | ✅ | 25 次/天免费 + 付费 | API Key |
-| Finnhub | 部分 | ✅ | ✅ | ✅ | ✅ | ✗ | 60 次/分免费 + 付费 | API Key |
-| Twelve Data | 部分 | ✅ | ✅ | ✅ | ✅ | ✅ | 800 次/天免费 | API Key |
-| Polygon.io | ✗ | ✅ | ✅ | ✅ | ✅ | ✗ | 免费额度小 + 付费 | API Key |
-| FMP | ✗ | ✅ | ✅ | ✅ | ✅ | ✗ | 250 次/天免费 | API Key |
-
-### 6.3 限速与稳定性约束
-
-- A 股实时行情：AkShare 底层抓东方财富 / 新浪，**高频会被封 IP**。
-  必须靠 Redis 缓存 + Scheduler 预热，前端永远打缓存。
-- 美股源（Yahoo / Alpha Vantage）：国内访问不稳定，**生产建议配代理或选 Finnhub**。
-- 限速型数据源（Alpha Vantage 25 次/天）：只作为 fallback，不作为主源。
+所有同步任务独立容错：单步失败返回 0 计数，不阻断后续步骤。
 
 ---
 
-## 7. 多市场支持
+## 10. 统一响应与错误码
 
-| 市场 | 代码示例 | 主源 | 备源 |
-|------|---------|------|------|
-| 上证 | 600519、510300 | AkShare | 东方财富 |
-| 深证 | 000001、159915 | AkShare | 东方财富 |
-| 创业板 | 300750 | AkShare | 东方财富 |
-| 科创板 | 688981 | AkShare | 东方财富 |
-| 北交所 | 830799 | AkShare（部分接口） | 东方财富 |
-| 港股 | 00700 | AkShare | Yahoo |
-| 美股（NASDAQ / NYSE） | AAPL、MSFT | Yahoo | Alpha Vantage / Finnhub |
-| 纳斯达克指数 | ^IXIC | Yahoo | AkShare |
-| 标普 500 | ^GSPC | Yahoo | AkShare |
-| 道琼斯 | ^DJI | Yahoo | AkShare |
-| 恒生指数 | ^HSI | AkShare | Yahoo |
+### 10.1 成功响应
 
-市场识别规则（Repository 层）：
-- A 股：代码以 `6 / 0 / 3 / 8` 开头（纯数字，6 位或 5 位北交所）
-- 港股：纯数字（通常 4~5 位）
-- 美股：字母代码（1~5 个字母）
-
----
-
-## 8. 搜索设计
-
-现拉现搜不现实（多数数据源无像样的模糊搜索）。采用"定时全量拉取 + 自建索引"。
-
-### 8.1 流程
-
-```text
-Scheduler 每日 09:00 拉全量股票 / ETF 列表 → 写 Storage(DB)
-  ↓
-search/index.py 构建 Trie / 倒排索引（代码、简称、拼音首字母）
-  ↓
-索引放内存 + Redis（便于多实例共享）
-  ↓
-搜索走索引，毫秒级返回
-```
-
-### 8.2 支持的匹配维度
-
-- 精确代码：`510300` → 沪深 300ETF
-- 简称：`贵州茅台` → 600519
-- 拼音首字母：`gzmt` → 600519 贵州茅台
-
----
-
-## 9. AI 分析设计
-
-### 9.1 流程（Function Calling）
-
-```text
-用户问题
-  ↓
-analyzer → LLM（决定是否需要调 tool）
-  ↓
-tools（查行情 / 资金流 / K 线）→ Provider 拉实时数据
-  ↓
-结果回填 LLM
-  ↓
-生成分析 → 返回前端
-```
-
-关键：模型自主决定何时反向拉数据，而非一次性塞死 Prompt。
-
-### 9.2 模块职责
-
-| 模块 | 职责 |
-|------|------|
-| `llm/client.py` | 统一接口，切换 OpenAI / DeepSeek / Qwen / Claude / Gemini |
-| `llm/prompt.py` | 系统提示词、角色设定 |
-| `llm/tools.py` | 把 Provider 能力包成 Function Calling tool schema |
-| `llm/analyzer.py` | 编排对话、决定何时调 tool、汇总结果 |
-
-### 9.3 支持的模型
-
-OpenAI / DeepSeek / Qwen / Claude / Gemini，切换仅需替换 client。
-
-### 9.4 成本与限流
-
-AI 接口昂贵，必须：
-- `middleware/ratelimit.py` 按 用户 / IP 限流
-- 每次调用记录 token 消耗与成本
-
----
-
-## 10. API 设计
-
-### 10.1 市场
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/market/index` | 大盘指数（上证、深证、创业板、恒生、纳斯达克...） |
-
-### 10.2 板块
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/sector/list` | 板块涨跌排行 |
-| GET | `/sector/{code}` | 板块详情（涨跌幅、成交额、领涨股、资金流） |
-
-### 10.3 个股
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/stock/{code}` | 个股详情（基本信息、实时行情、K 线、资金流、所属板块） |
-
-### 10.4 ETF
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/etf/{code}` | ETF 详情（行情、规模、跟踪指数、折溢价、资金流） |
-
-### 10.5 搜索
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/search?q={keyword}` | 跨股票 / ETF / 指数搜索（代码 / 简称 / 拼音） |
-
-### 10.6 主力资金
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/fund_flow/{code}` | 个股 / ETF 主力资金 |
-| GET | `/fund_flow/market` | 大盘资金流 |
-
-### 10.7 AI
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/ai/analyze` | AI 分析（股票 / ETF / 板块 / 大盘 / 问答） |
-
-请求体示例：
 ```json
-{
-  "type": "stock",
-  "code": "600519",
-  "question": "最近走势怎么样？"
-}
+{ "code": 0, "message": "ok", "data": { ... } }
 ```
 
----
+### 10.2 错误码体系
 
-## 11. 需求覆盖矩阵
-
-| 需求 | 能否实现 | 关键依赖 |
-|------|---------|---------|
-| 当天行情（板块 / 个股 / 资金） | ✅ | Redis 缓存 + Scheduler 预热（绕过限速） |
-| 数据源可选 | ✅ | Repository 路由 + Provider 能力声明 |
-| 上证 / 深证 / 纳斯达克等 | ✅ | 跨市场路由；美股需注意国内访问稳定性 |
-| 代码 / 名称搜索 | ✅ | 自建搜索索引（定时全量拉取） |
-| AI 分析 | ✅ | Function Calling + 限流控成本 |
-
-### 上线前必须解决的硬约束
-
-1. **AkShare 同步库必须 `to_thread` 包装**（否则阻塞事件循环）
-2. **实时行情必须 Redis 缓存兜底**（否则被源限速 / 封 IP）
-3. **美股源国内访问需配代理**（否则不稳定）
+| code | HTTP | 异常 | 含义 |
+|------|------|------|------|
+| 40001 | 400 | `ValidationError` | 业务校验失败 |
+| 40401 | 404 | `NotFoundError` | 资源不存在 |
+| 42201 | 422 | `RequestValidationError` | 请求参数校验失败（FastAPI 自动） |
+| 42901 | 429 | `RateLimitExceededError` | 请求超限流（附 `Retry-After` 头） |
+| 50001 | 500 | `ServiceError` | 服务异常 |
+| 50201 | 502 | `ProviderError` | 数据源异常（上游不可用） |
 
 ---
 
-## 12. 待定事项（实现时再决策）
+## 11. 关键工程约束
 
-- [ ] 数据库选型：SQLite（开发） vs PostgreSQL（生产）
-- [ ] 搜索引擎：自建 Trie / 倒排 vs Whoosh vs Redisearch
-- [ ] LLM 默认模型
-- [ ] 限流策略：内存令牌桶 vs Redis
-- [ ] 部署方式：单进程 vs Docker
+1. **AkShare 同步库必须 `to_thread` 包装**：`SyncProviderBase._run` 推入线程池，避免阻塞事件循环
+2. **实时行情必须缓存兜底**：数据源有限速，前端永远打缓存
+3. **多源 fallback**：东方财富不可用时自动切换新浪/腾讯
+
+---
+
+## 12. 待实现
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| ETF 详情 `GET /etf/{code}` | ❌ | 当前 `/stock/{code}` 正则排除 ETF 代码 |
+| 主力资金 `GET /fund_flow/{code}` | ❌ | 腾讯源已有 `zljlr` 字段可复用 |
+| K 线同步 | ❌ | 表已定义，无 Scheduler 写入 |
+| AI 分析 `POST /ai/analyze` | ❌ | `llm/` 空包，限流已就绪 |
+| 数据源主备 failover | ❌ | `repository/fallback.py` 设计稿，未实现 |
