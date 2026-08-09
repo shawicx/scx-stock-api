@@ -2,11 +2,13 @@
 @description 限流策略测试：覆盖 CacheBackend.incr、客户端 IP 提取、限流命中、健康检查不受影响。
 """
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from scx_stock.cache.backend import MemoryCache
+from scx_stock.cache.backend import MemoryCache, RedisCache
 from scx_stock.cache.keys import rate_limit as rate_limit_key
 from scx_stock.exceptions.service import RateLimitExceededError
 from scx_stock.middleware.rate_limit import get_client_ip
@@ -50,6 +52,65 @@ async def test_memory_incr_expires_after_ttl():
     # 等待 TTL 过期（直接操作内部存储模拟过期）
     cache._store["k"] = (cache._store["k"][0], time.time() - 1)
     assert await cache.incr("k", ttl=70) == 1
+
+
+# ---------------------------------------------------------------------------
+# RedisCache.incr 单元测试（mock pipeline，验证 execute 返回值解包）
+#
+# 回归保护：曾因 pipe.incr() 返回 Pipeline 对象（非整数）导致
+# int(Pipeline) → TypeError，限流端点全部 500。
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_redis_client() -> MagicMock:
+    """构造带 async pipeline 的 mock Redis client。
+
+    pipeline 链式调用 incr/expire 返回自身，execute 返回结果列表。
+
+    :returns: mock client。
+    """
+    client = MagicMock()
+    pipe = AsyncMock()
+    # 链式调用：incr / expire 返回 pipe 自身
+    pipe.incr.return_value = pipe
+    pipe.expire.return_value = pipe
+    # execute 返回 [incr结果, expire结果]
+    pipe.execute.return_value = [1, True]
+    # async context manager：async with client.pipeline() as pipe
+    client.pipeline.return_value.__aenter__ = AsyncMock(return_value=pipe)
+    client.pipeline.return_value.__aexit__ = AsyncMock(return_value=None)
+    client._mock_pipe = pipe
+    return client
+
+
+async def test_redis_incr_returns_int():
+    """RedisCache.incr 必须返回 int（而非 Pipeline 对象）。"""
+    client = _make_mock_redis_client()
+    client._mock_pipe.execute.return_value = [1, True]
+    cache = RedisCache(client)
+    count = await cache.incr("k", ttl=70)
+    assert isinstance(count, int)
+    assert count == 1
+
+
+async def test_redis_incr_increments():
+    """execute 返回的计数值被正确解包。"""
+    client = _make_mock_redis_client()
+    client._mock_pipe.execute.return_value = [3, True]
+    cache = RedisCache(client)
+    count = await cache.incr("k", ttl=70)
+    assert count == 3
+
+
+async def test_redis_incr_calls_pipeline_commands():
+    """pipeline 中按顺序提交 incr + expire。"""
+    client = _make_mock_redis_client()
+    cache = RedisCache(client)
+    await cache.incr("mykey", ttl=60)
+    pipe = client._mock_pipe
+    pipe.incr.assert_awaited_once_with("mykey")
+    pipe.expire.assert_awaited_once_with("mykey", 60)
+    pipe.execute.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

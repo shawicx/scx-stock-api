@@ -83,12 +83,51 @@ class Settings(BaseSettings):
     # 限流
     ai_rate_limit_per_minute: int = 20
 
+    # 关注列表（逗号分隔的代码，股票/ETF 均可），供每日分析任务使用
+    watchlist: str = ""
+
+    # 每日报告收件人（逗号分隔邮箱）
+    notify_emails: str = ""
+
+    # LLM 配置（OpenAI 兼容接口，支持 glm / deepseek）
+    llm_provider: Literal["glm", "deepseek"] = "deepseek"
+    llm_api_key: str = ""
+    llm_base_url: str = "https://api.deepseek.com/v1"
+    llm_model: str = "deepseek-chat"
+    llm_timeout: int = 30
+
+    # SMTP 邮件配置
+    smtp_host: str = ""
+    smtp_port: int = 465
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from_name: str = "ETF日报"
+    smtp_use_ssl: bool = True
+
+    # 分析任务配置
+    analysis_cron: str = "0 21 * * 1-5"  # 每个交易日 21:00（Asia/Shanghai）
+    analysis_kline_days: int = 120  # K 线窗口大小
+
     def cors_origin_list(self) -> list[str]:
         """解析 CORS 允许源为列表。
 
         :returns: 去空白后的源列表；含 '*' 时返回 ['*']。
         """
         return [s.strip() for s in self.cors_origins.split(",") if s.strip()]
+
+    def watchlist_codes(self) -> list[str]:
+        """解析关注列表配置为代码列表。
+
+        :returns: 去空白后的代码列表；未配置时返回空列表。
+        """
+        return [s.strip() for s in self.watchlist.split(",") if s.strip()]
+
+    def notify_email_list(self) -> list[str]:
+        """解析收件人配置为邮箱列表。
+
+        :returns: 去空白后的邮箱列表；未配置时返回空列表。
+        """
+        return [s.strip() for s in self.notify_emails.split(",") if s.strip()]
 
 
 @lru_cache

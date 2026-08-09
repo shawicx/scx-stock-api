@@ -21,6 +21,7 @@ _USER_AGENT = (
 # 需要绕过代理直连的国内数据源域名
 _DIRECT_DOMAINS = (
     "push2.eastmoney.com",
+    "push2his.eastmoney.com",
     "82.push2.eastmoney.com",
     "7.push2.eastmoney.com",
     "17.push2.eastmoney.com",

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日支撑位分析报告</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f5f5f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f5f5f5;padding:24px 0;">
+<tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+
+<!-- 标题 -->
+<tr>
+<td style="background-color:#1a73e8;padding:24px 32px;">
+<h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">每日支撑位分析报告</h1>
+<p style="margin:4px 0 0 0;color:#e8f0fe;font-size:13px;">{{ report_date }}</p>
+</td>
+</tr>
+
+<!-- 汇总 -->
+<tr>
+<td style="padding:20px 32px 0 32px;">
+<p style="margin:0;color:#5f6368;font-size:14px;line-height:1.6;">
+本次共分析 <strong style="color:#1a73e8;">{{ total }}</strong> 只标的，其中
+<span style="color:#1e8e3e;">成功 {{ success }}</span>，
+<span style="color:#d93025;">失败 {{ failed }}</span>。
+</p>
+</td>
+</tr>
+
+<!-- 标的明细 -->
+<tr>
+<td style="padding:16px 32px;">
+{% for item in items %}
+<div style="border:1px solid #e8eaed;border-radius:6px;padding:16px 20px;margin-bottom:12px;">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+<span style="font-size:16px;font-weight:600;color:#202124;">{{ item.name }}（{{ item.code }}）</span>
+{% if item.ok %}
+<span style="font-size:12px;color:#5f6368;background:#f1f3f4;padding:2px 8px;border-radius:10px;">{{ item.trend }}</span>
+{% else %}
+<span style="font-size:12px;color:#d93025;background:#fce8e6;padding:2px 8px;border-radius:10px;">分析失败</span>
+{% endif %}
+</div>
+
+{% if item.ok %}
+<table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#3c4043;">
+<tr>
+<td style="padding:4px 0;width:50%;">收盘价：<strong>{{ item.close }}</strong></td>
+<td style="padding:4px 0;">涨跌幅：
+{% if item.change_pct and item.change_pct > 0 %}<span style="color:#d93025;">+{{ item.change_pct }}%</span>
+{% elif item.change_pct and item.change_pct < 0 %}<span style="color:#1e8e3e;">{{ item.change_pct }}%</span>
+{% else %}<span>{{ item.change_pct }}</span>{% endif %}
+</td>
+</tr>
+<tr>
+<td style="padding:4px 0;">第一支撑：<strong style="color:#1e8e3e;">{{ item.support_1_price }}</strong>
+{% if item.support_1_price %}<span style="color:#5f6368;font-size:12px;">（{{ item.support_1_pct }}%）</span>{% endif %}
+</td>
+<td style="padding:4px 0;">压力位：<strong style="color:#d93025;">{{ item.resistance_1_price }}</strong>
+{% if item.resistance_1_price %}<span style="color:#5f6368;font-size:12px;">（{{ item.resistance_1_pct }}%）</span>{% endif %}
+</td>
+</tr>
+{% if item.support_2_price %}
+<tr>
+<td colspan="2" style="padding:4px 0;">第二支撑：<strong style="color:#1e8e3e;">{{ item.support_2_price }}</strong>
+<span style="color:#5f6368;font-size:12px;">（{{ item.support_2_pct }}%）</span>
+</td>
+</tr>
+{% endif %}
+</table>
+
+{% if item.summary %}
+<p style="margin:12px 0 0 0;padding:10px 12px;background:#f8f9fa;border-radius:4px;font-size:13px;color:#3c4043;line-height:1.6;">{{ item.summary }}</p>
+{% endif %}
+
+{% else %}
+<p style="margin:0;font-size:13px;color:#d93025;">{{ item.error }}</p>
+{% endif %}
+</div>
+{% endfor %}
+</td>
+</tr>
+
+<!-- 免责声明 -->
+<tr>
+<td style="padding:16px 32px 24px 32px;border-top:1px solid #e8eaed;">
+<p style="margin:0;font-size:12px;color:#9aa0a6;line-height:1.6;">
+⚠️ 本邮件内容由程序基于历史行情数据自动生成，仅用于技术参考，不构成任何投资建议。市场有风险，决策需谨慎。
+</p>
+</td>
+</tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>

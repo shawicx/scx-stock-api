@@ -15,6 +15,7 @@ import akshare as ak
 from scx_stock.exceptions.provider import ProviderError, ProviderUnavailableError
 from scx_stock.provider.base import SyncProviderBase
 from scx_stock.schema.index import IndexQuote
+from scx_stock.schema.kline import Kline, KlineBar
 from scx_stock.schema.sector import SectorQuote
 from scx_stock.schema.stock import Quote, StockInfo, StockListItem
 from scx_stock.search.pinyin import make_pinyin_for_search
@@ -140,6 +141,83 @@ class AkshareProvider(SyncProviderBase):
             open=_to_float(r.get("今开")),
             timestamp=_now_str(),
         )
+
+    async def get_kline(self, code: str, days: int = 120) -> Kline:
+        """获取近 N 个交易日的前复权日 K 线。
+
+        ETF 与 A 股股票使用不同 AkShare 接口：
+          - ETF（代码首位 5/1）：``fund_etf_hist_em(adjust="qfq")``
+          - 股票（其他）：``stock_zh_a_hist(adjust="qfq")``
+
+        通过 ``_run`` 推入线程池执行，避免阻塞事件循环。
+
+        :param code: 证券代码（股票或 ETF）。
+        :param days: 返回的最近交易日数量。
+        :returns: Kline（按日期升序）。
+        :raises ProviderError: 数据源异常或代码不存在。
+
+        :example kline = await provider.get_kline("510300", days=120)
+        """
+        df = await self._fetch_kline_df(code)
+        if df is None or df.empty:
+            raise ProviderError(f"kline data empty: {code}")
+
+        bars: list[KlineBar] = []
+        for _, r in df.iterrows():
+            trade_date = _to_date(r.get("日期"))
+            o = _to_float(r.get("开盘"))
+            c = _to_float(r.get("收盘"))
+            h = _to_float(r.get("最高"))
+            low = _to_float(r.get("最低"))
+            vol = _to_float(r.get("成交量"))
+            if trade_date is None or c is None:
+                continue
+            bars.append(
+                KlineBar(
+                    trade_date=trade_date,
+                    open=o or 0.0,
+                    close=c,
+                    high=h or c,
+                    low=low or c,
+                    volume=vol or 0.0,
+                )
+            )
+
+        bars.sort(key=lambda b: b.trade_date)
+        if days > 0:
+            bars = bars[-days:]
+        return Kline(code=code, bars=bars)
+
+    async def _fetch_kline_df(self, code: str):
+        """按代码类型选择 AkShare K 线接口拉取 DataFrame，带多源 fallback。
+
+        ETF（代码首位 5/1）：东方财富 ``fund_etf_hist_em`` → 新浪 ``fund_etf_hist_sina``
+        股票（首位 0/3/6/8）：东方财富 ``stock_zh_a_hist`` → 腾讯 ``stock_zh_a_hist_tx``
+
+        东方财富历史接口（push2his.eastmoney.com）在部分网络环境会被反爬封锁
+        （SSL 握手超时），新浪/腾讯备选保证可用性。
+
+        :param code: 证券代码。
+        :returns: 已归一化列名（中文：日期/开盘/收盘/最高/最低/成交量）的 DataFrame。
+        :raises ProviderUnavailableError: 所有数据源均失败。
+        """
+        head = code[0] if code else ""
+        is_etf = head in ("5", "1") and len(code) == 6
+
+        if is_etf:
+            sources = [
+                ("em", ak.fund_etf_hist_em, {"symbol": code, "period": "daily", "adjust": "qfq"}),
+                ("sina", ak.fund_etf_hist_sina, {"symbol": _to_tx_code(code)}),
+            ]
+        else:
+            sources = [
+                ("em", ak.stock_zh_a_hist, {"symbol": code, "period": "daily", "adjust": "qfq"}),
+                ("tx", ak.stock_zh_a_hist_tx, {"symbol": _to_tx_code(code),
+                                                "start_date": "20200101", "end_date": "20501231"}),
+            ]
+
+        source, df = await self._call_with_fallback(sources, domain=f"get_kline({code})")
+        return _normalize_kline_columns(df, source)
 
     async def list_stocks(self) -> list[StockInfo]:
         """获取 A 股全量股票列表，用于搜索索引构建（东方财富 → 新浪 → 腾讯 fallback）。
@@ -467,18 +545,78 @@ def _now_str() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _to_date(v: Any):
+    """安全转 date，兼容字符串与 datetime。
+
+    :param v: 原始值。
+    :returns: date 或 None。
+    """
+    from datetime import date, datetime
+
+    if v is None or v == "":
+        return None
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    try:
+        return datetime.strptime(str(v)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+# K 线列名归一化映射：各数据源列名 → 统一中文列名（与 get_kline 读取逻辑对齐）
+_KLINE_COLUMN_MAP: dict[str, dict[str, str]] = {
+    "em": {},  # 东方财富已是中文列名，无需映射
+    "sina": {  # 新浪 fund_etf_hist_sina：date/open/high/low/close/volume
+        "date": "日期",
+        "open": "开盘",
+        "close": "收盘",
+        "high": "最高",
+        "low": "最低",
+        "volume": "成交量",
+    },
+    "tx": {  # 腾讯 stock_zh_a_hist_tx：date/open/close/high/low/volume
+        "date": "日期",
+        "open": "开盘",
+        "close": "收盘",
+        "high": "最高",
+        "low": "最低",
+        "volume": "成交量",
+    },
+}
+
+
+def _normalize_kline_columns(df: Any, source: str) -> Any:
+    """将不同数据源的 K 线列名归一化为统一中文列名。
+
+    东方财富源已使用中文列名（日期/开盘/收盘/最高/最低/成交量），
+    新浪/腾讯源使用英文列名（date/open/close/high/low/volume），需映射。
+
+    :param df: AkShare 返回的 DataFrame。
+    :param source: 数据源标识（em/sina/tx）。
+    :returns: 列名归一化后的 DataFrame。
+    """
+    mapping = _KLINE_COLUMN_MAP.get(source, {})
+    if not mapping or df is None or df.empty:
+        return df
+    return df.rename(columns=mapping)
+
+
 def _classify_market(code: str) -> str:
     """按代码前缀识别市场。
 
-    :param code: 股票代码。
+    ETF（5/1 开头）也会经过此函数，在 list_etf_quotes 中会被统一覆盖为 "ETF"。
+
+    :param code: 股票/ETF 代码。
     :returns: 市场名。
     """
     if not code:
         return "未知"
     head = code[0]
-    if head == "6":
+    if head in ("6", "5"):  # 沪市股票 / 沪市 ETF
         return "上证"
-    if head in ("0", "3"):
+    if head in ("0", "3", "1"):  # 深市股票 / 深市 ETF
         return "深证"
     if head in ("8", "4"):
         return "北交所"
@@ -491,17 +629,25 @@ def _classify_market(code: str) -> str:
 
 
 def _to_tx_code(code: str) -> str:
-    """标准代码转腾讯格式（加交易所前缀）。
+    """标准代码转带交易所前缀格式（sh/sz），供新浪/腾讯源使用。
 
-    :param code: 标准代码，如 "600519"。
-    :returns: 腾讯格式，如 "sh600519"。
+    市场前缀规则：
+      - 6 开头（沪市股票）→ sh
+      - 5 开头（沪市 ETF/基金，如 510300）→ sh
+      - 0/3 开头（深市股票）→ sz
+      - 1 开头（深市 ETF/基金，如 159915）→ sz
 
-    :example _to_tx_code("600519")  # "sh600519"
+    :param code: 标准代码，如 "600519" 或 "510300"。
+    :returns: 带前缀格式，如 "sh600519" 或 "sh510300"。
+
+    :example _to_tx_code("600519")   # "sh600519"
+    :example _to_tx_code("510300")   # "sh510300"
+    :example _to_tx_code("159915")   # "sz159915"
     """
     if not code:
         return code
     head = code[0]
-    if head == "6":
+    if head in ("6", "5"):
         return f"sh{code}"
     return f"sz{code}"
 

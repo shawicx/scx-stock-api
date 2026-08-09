@@ -68,11 +68,11 @@ class RedisCache(CacheBackend):
     async def incr(self, key: str, ttl: int) -> int:
         # pipeline 保证 INCR 与 EXPIRE 原子提交；仅在首次（值为 1）时设置过期，
         # 避免每次自增都刷新 TTL 导致窗口无法自然结束。
+        # 注意：pipe.incr() 返回 Pipeline（链式），真实结果在 execute() 返回值中。
         async with self._client.pipeline(transaction=True) as pipe:
-            count = await pipe.incr(key)
-            if count == 1:
-                await pipe.expire(key, ttl)
-            await pipe.execute()
+            await pipe.incr(key)
+            await pipe.expire(key, ttl)
+            count, _ = await pipe.execute()
         return int(count)
 
     async def close(self) -> None:

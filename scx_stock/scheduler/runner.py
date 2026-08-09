@@ -8,12 +8,14 @@ from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from scx_stock.config.settings import get_settings
 from scx_stock.scheduler.sync_jobs import (
     rebuild_search_index,
     sync_all,
     sync_etf_list,
     sync_stock_industries,
 )
+from scx_stock.scheduler.analysis_job import daily_analysis_job
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,7 @@ logger = logging.getLogger(__name__)
 #   - 每日 09:10 同步 ETF 列表
 #   - 每日 09:15 同步行业映射
 #   - 每日 09:20 重建搜索索引
+#   - 每日 21:00 执行支撑位分析并发邮件（cron 来自 SCX_ANALYSIS_CRON）
 DEFAULT_SCHEDULE = {
     "sync_stock_list": {"cron": "0 9 * * 1-5", "func_name": "sync_stock_list"},
     "sync_etf_list": {"cron": "10 9 * * 1-5", "func_name": "sync_etf_list"},
@@ -30,6 +33,7 @@ DEFAULT_SCHEDULE = {
         "cron": "20 9 * * 1-5",
         "func_name": "rebuild_search_index",
     },
+    "daily_analysis": {"cron": None, "func_name": "daily_analysis"},  # cron 动态取自 Settings
 }
 
 # 任务名 → 异步函数
@@ -38,6 +42,7 @@ _JOB_REGISTRY: dict[str, Any] = {
     "sync_etf_list": sync_etf_list,
     "sync_stock_industries": sync_stock_industries,
     "rebuild_search_index": rebuild_search_index,
+    "daily_analysis": daily_analysis_job,
 }
 
 
@@ -52,12 +57,15 @@ class SchedulerRunner:
 
     def setup(self) -> None:
         """注册默认任务（不立即启动）。"""
+        s = get_settings()
         for job_id, cfg in DEFAULT_SCHEDULE.items():
             func = _JOB_REGISTRY.get(cfg["func_name"])
             if func is None:
                 logger.warning("unknown job func: %s, skip", cfg["func_name"])
                 continue
-            trigger = CronTrigger.from_crontab(cfg["cron"])
+            # daily_analysis 的 cron 动态取自 SCX_ANALYSIS_CRON
+            cron = cfg["cron"] or s.analysis_cron
+            trigger = CronTrigger.from_crontab(cron)
             self._scheduler.add_job(
                 func,
                 trigger=trigger,
@@ -66,7 +74,7 @@ class SchedulerRunner:
                 replace_existing=True,
                 misfire_grace_time=600,
             )
-            logger.info("registered job %s (%s)", job_id, cfg["cron"])
+            logger.info("registered job %s (%s)", job_id, cron)
 
     def start(self) -> None:
         """启动调度器。"""

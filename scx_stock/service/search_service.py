@@ -39,7 +39,9 @@ class SearchService:
             return cached  # type: ignore[return-value]
 
         results = get_index().search(keyword, limit=limit)
-        await self._cache.set(cache_key, results, _TTL_SEARCH)
+        # 空结果不缓存：索引重建后旧空结果会持续命中缓存导致搜不到新数据
+        if results:
+            await self._cache.set(cache_key, results, _TTL_SEARCH)
         return results
 
     async def index_size(self) -> int:
