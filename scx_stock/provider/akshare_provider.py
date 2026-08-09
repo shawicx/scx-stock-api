@@ -1,8 +1,13 @@
 """
 @description AkShare 数据源实现，封装个股行情、ETF、板块、指数等能力。
+
+内置多数据源自动切换：东方财富接口（push2.eastmoney.com）在云服务器（如阿里云 ECS）
+上会被反爬封锁（RemoteDisconnected），因此在每个领域方法中配置了 fallback 链：
+优先尝试字段最全的东方财富版（_em 后缀），失败后自动切换到新浪/腾讯版。
 """
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import akshare as ak
@@ -21,9 +26,37 @@ class AkshareProvider(SyncProviderBase):
     """AkShare 数据源 Provider。
 
     所有 AkShare 调用通过 _run 推入线程池执行，避免阻塞事件循环。
+    每个领域方法内置 fallback：东方财富失败 → 新浪/腾讯备选。
     """
 
     name = "akshare"
+
+    async def _call_with_fallback(
+        self,
+        sources: list[tuple[str, Callable[..., Any], dict[str, Any]]],
+        domain: str,
+    ) -> tuple[str, Any]:
+        """按优先级尝试多个数据源函数，第一个成功就返回。
+
+        :param sources: (数据源名, 函数, kwargs) 列表，按优先级排序。
+        :param domain: 领域标识（用于日志）。
+        :returns: (数据源名, 返回值) 元组，数据源名用于选择字段映射逻辑。
+        :raises ProviderUnavailableError: 所有数据源均失败。
+        """
+        last_error: Exception | None = None
+        for i, (source_name, func, kwargs) in enumerate(sources):
+            try:
+                result = await self._run(func, **kwargs)
+                if i > 0:
+                    logger.info("%s fallback to %s succeeded", domain, source_name)
+                return source_name, result
+            except Exception as e:  # noqa: BLE001
+                logger.warning("%s source %s failed: %s", domain, source_name, e)
+                last_error = e
+                continue
+        raise ProviderUnavailableError(
+            f"{domain}: all sources failed"
+        ) from last_error
 
     async def get_stock(self, code: str) -> StockInfo:
         """获取个股基础信息（由实时行情派生）。
@@ -54,30 +87,44 @@ class AkshareProvider(SyncProviderBase):
         )
 
     async def get_quote(self, code: str) -> Quote:
-        """获取个股实时行情。
+        """获取个股实时行情（东方财富 → 新浪 → 腾讯 fallback）。
 
         :param code: 股票代码。
         :returns: Quote。
         :raises ProviderError: 数据源异常或代码不存在。
         """
-        try:
-            df = await self._run(ak.stock_zh_a_spot_em)  # 全市场快照
-        except Exception as e:  # noqa: BLE001
-            logger.warning("akshare get_quote failed: %s", e)
-            raise ProviderUnavailableError("akshare quote unavailable") from e
+        source, df = await self._call_with_fallback(
+            [
+                ("em", ak.stock_zh_a_spot_em, {}),
+                ("sina", ak.stock_zh_a_spot, {}),
+                ("tx", ak.stock_zh_a_spot_tx, {}),
+            ],
+            domain="get_quote",
+        )
 
         if df is None or df.empty:
             raise ProviderError("quote data empty")
 
-        row = df[df["代码"] == code]
+        if source == "tx":
+            # 腾讯源代码格式为 sh600519 / sz000001
+            tx_code = _to_tx_code(code)
+            row = df[df["code"] == tx_code]
+        else:
+            row = df[df["代码"] == code]
         if row.empty:
             raise ProviderError(f"quote not found: {code}")
 
         r = row.iloc[0]
+        if source == "tx":
+            return _tx_row_to_quote(r, code)
         last = _to_float(r.get("最新价"))
         prev = _to_float(r.get("昨收"))
-        change = last - prev if last and prev else None
-        change_pct = (change / prev * 100) if (change is not None and prev) else None
+        change = _to_float(r.get("涨跌额"))
+        if change is None and last and prev:
+            change = last - prev
+        change_pct = _to_float(r.get("涨跌幅"))
+        if change_pct is None and change is not None and prev:
+            change_pct = change / prev * 100
 
         return Quote(
             code=code,
@@ -95,16 +142,20 @@ class AkshareProvider(SyncProviderBase):
         )
 
     async def list_stocks(self) -> list[StockInfo]:
-        """获取 A 股全量股票列表，用于搜索索引构建。
+        """获取 A 股全量股票列表，用于搜索索引构建（东方财富 → 新浪 → 腾讯 fallback）。
 
         :returns: StockInfo 列表（含拼音与 type）。
         """
-        try:
-            df = await self._run(ak.stock_zh_a_spot_em)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("akshare list_stocks failed: %s", e)
-            raise ProviderUnavailableError("akshare stock list unavailable") from e
-
+        source, df = await self._call_with_fallback(
+            [
+                ("em", ak.stock_zh_a_spot_em, {}),
+                ("sina", ak.stock_zh_a_spot, {}),
+                ("tx", ak.stock_zh_a_spot_tx, {}),
+            ],
+            domain="list_stocks",
+        )
+        if source == "tx":
+            return _tx_df_to_stock_info(df, default_type="stock")
         return self._df_to_stock_info(df, default_type="stock")
 
     async def list_stock_quotes(
@@ -113,28 +164,34 @@ class AkshareProvider(SyncProviderBase):
     ) -> list[StockListItem]:
         """获取 A 股全市场实时行情列表（含价格/涨跌/换手/主力资金/行业）。
 
-        数据来源（全部走线程池，不阻塞事件循环）：
-          - ``stock_zh_a_spot_em``：行情快照（价格/涨跌/换手等）
-          - ``stock_individual_fund_flow_rank("今日")``：全市场主力资金流排名
-          - ``industry_map``：由调用方注入的 code → 行业映射（来自 DB）
+        数据源 fallback 链（全部走线程池，不阻塞事件循环）：
+          1. 东方财富 ``stock_zh_a_spot_em``：字段全（含换手率、主力资金）
+          2. 新浪 ``stock_zh_a_spot``：字段较少（无换手率），云服务器可用
+          3. 腾讯 ``stock_zh_a_spot_tx``：含换手率 + 主力资金（主力净流入 zljlr）
+
+        行业映射为增强字段，由调用方注入（来自 DB），容错失败则为 None。
 
         :param industry_map: code → 行业映射字典，为空则 industry 字段为 None。
         :returns: StockListItem 列表。
-        :raises ProviderUnavailableError: 数据源不可用。
+        :raises ProviderUnavailableError: 所有数据源不可用。
         """
-        try:
-            df = await self._run(ak.stock_zh_a_spot_em)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("akshare list_stock_quotes failed: %s", e)
-            raise ProviderUnavailableError("akshare stock quote list unavailable") from e
+        source, df = await self._call_with_fallback(
+            [
+                ("em", ak.stock_zh_a_spot_em, {}),
+                ("sina", ak.stock_zh_a_spot, {}),
+                ("tx", ak.stock_zh_a_spot_tx, {}),
+            ],
+            domain="list_stock_quotes",
+        )
 
-        # 资金流排名（容错：失败则不 merge，主力资金字段为 None）
-        fund_flow_map = await self._fetch_fund_flow_rank()
-
-        # 行业映射由调用方注入（DB 来源），未注入则为空
         if industry_map is None:
             industry_map = {}
 
+        # 腾讯源自带主力资金字段（zljlr），无需额外 merge；其他源用 fund_flow_map 补充
+        if source == "tx":
+            return _tx_df_to_stock_quotes(df, industry_map)
+
+        fund_flow_map = await self._fetch_fund_flow_rank()
         return self._df_to_stock_quotes(df, fund_flow_map, industry_map)
 
     async def _fetch_fund_flow_rank(self) -> dict[str, dict[str, float]]:
@@ -212,29 +269,32 @@ class AkshareProvider(SyncProviderBase):
         return out
 
     async def list_etfs(self) -> list[StockInfo]:
-        """获取全量 ETF 列表，用于搜索索引构建。
+        """获取全量 ETF 列表，用于搜索索引构建（东方财富 → 同花顺 fallback）。
 
         :returns: StockInfo 列表（含拼音与 type=etf）。
         """
-        try:
-            df = await self._run(ak.fund_etf_spot_em)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("akshare list_etfs failed: %s", e)
-            raise ProviderUnavailableError("akshare etf list unavailable") from e
-
+        _, df = await self._call_with_fallback(
+            [
+                ("em", ak.fund_etf_spot_em, {}),
+                ("ths", ak.fund_etf_spot_ths, {}),
+            ],
+            domain="list_etfs",
+        )
         return self._df_to_stock_info(df, default_type="etf")
 
     async def list_etf_quotes(self) -> list[StockListItem]:
-        """获取全量 ETF 实时行情列表。
+        """获取全量 ETF 实时行情列表（东方财富 → 同花顺 fallback）。
 
         :returns: StockListItem 列表（market 统一为 "ETF"）。
         :raises ProviderUnavailableError: 数据源不可用。
         """
-        try:
-            df = await self._run(ak.fund_etf_spot_em)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("akshare list_etf_quotes failed: %s", e)
-            raise ProviderUnavailableError("akshare etf quote list unavailable") from e
+        _, df = await self._call_with_fallback(
+            [
+                ("em", ak.fund_etf_spot_em, {}),
+                ("ths", ak.fund_etf_spot_ths, {}),
+            ],
+            domain="list_etf_quotes",
+        )
 
         items = self._df_to_stock_quotes(df)
         # ETF 不按代码前缀细分市场，统一标记
@@ -270,16 +330,18 @@ class AkshareProvider(SyncProviderBase):
         return out
 
     async def list_sectors(self) -> list[SectorQuote]:
-        """获取行业板块实时涨跌列表（东方财富）。
+        """获取行业板块实时涨跌列表（东方财富 → 新浪 fallback）。
 
         :returns: SectorQuote 列表。
         :raises ProviderUnavailableError: 数据源不可用。
         """
-        try:
-            df = await self._run(ak.stock_board_industry_name_em)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("akshare list_sectors failed: %s", e)
-            raise ProviderUnavailableError("akshare sector list unavailable") from e
+        _, df = await self._call_with_fallback(
+            [
+                ("em", ak.stock_board_industry_name_em, {}),
+                ("sina", ak.stock_sector_spot, {"indicator": "新浪行业"}),
+            ],
+            domain="list_sectors",
+        )
 
         if df is None or df.empty:
             return []
@@ -306,6 +368,9 @@ class AkshareProvider(SyncProviderBase):
     async def get_sector_constituents(self, sector_name: str) -> list[dict[str, str]]:
         """获取板块成分股（按板块名称，如 "小金属"）。
 
+        仅支持东方财富源（新浪接口按概念代码查询，参数语义不同）。
+        主要用于 Scheduler 定时同步行业映射（本地/非高峰期，反爬风险低）。
+
         :param sector_name: 板块名称（东方财富行业板块名）。
         :returns: 成分股列表，每项含 code / name。
         :raises ProviderError: 数据源异常或板块不存在。
@@ -330,18 +395,19 @@ class AkshareProvider(SyncProviderBase):
         return out
 
     async def list_indexes(self, group: str = "沪深重要指数") -> list[IndexQuote]:
-        """获取指数实时行情列表（东方财富）。
+        """获取指数实时行情列表（东方财富 → 新浪 fallback）。
 
-        :param group: 指数分组，可选：沪深重要指数 / 上证系列指数 / 深证系列指数 /
-            指数成份 / 中证系列指数。
+        :param group: 指数分组（仅东方财富源使用），可选：沪深重要指数 / 上证系列指数等。
         :returns: IndexQuote 列表。
         :raises ProviderUnavailableError: 数据源不可用。
         """
-        try:
-            df = await self._run(ak.stock_zh_index_spot_em, symbol=group)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("akshare list_indexes failed: %s", e)
-            raise ProviderUnavailableError("akshare index list unavailable") from e
+        _, df = await self._call_with_fallback(
+            [
+                ("em", ak.stock_zh_index_spot_em, {"symbol": group}),
+                ("sina", ak.stock_zh_index_spot_sina, {}),
+            ],
+            domain="list_indexes",
+        )
 
         if df is None or df.empty:
             return []
@@ -417,3 +483,141 @@ def _classify_market(code: str) -> str:
     if head in ("8", "4"):
         return "北交所"
     return "其他"
+
+
+# ---------------------------------------------------------------------------
+# 腾讯财经数据源辅助映射（列名为拼音缩写，与东方财富/新浪的中文列名完全不同）
+# ---------------------------------------------------------------------------
+
+
+def _to_tx_code(code: str) -> str:
+    """标准代码转腾讯格式（加交易所前缀）。
+
+    :param code: 标准代码，如 "600519"。
+    :returns: 腾讯格式，如 "sh600519"。
+
+    :example _to_tx_code("600519")  # "sh600519"
+    """
+    if not code:
+        return code
+    head = code[0]
+    if head == "6":
+        return f"sh{code}"
+    return f"sz{code}"
+
+
+def _from_tx_code(tx_code: str) -> str:
+    """腾讯格式代码转标准代码（去交易所前缀）。
+
+    :param tx_code: 腾讯格式，如 "sh600519"。
+    :returns: 标准代码，如 "600519"。
+    """
+    if len(tx_code) > 2 and tx_code[:2] in ("sh", "sz"):
+        return tx_code[2:]
+    return tx_code
+
+
+def _tx_df_to_stock_quotes(
+    df: Any,
+    industry_map: dict[str, str] | None = None,
+) -> list[StockListItem]:
+    """腾讯行情 DataFrame → StockListItem 列表。
+
+    腾讯列名映射：code→代码, name→名称, zxj→最新价, zdf→涨跌幅, zd→涨跌额,
+    volume→成交量, turnover→成交额, hsl→换手率, zljlr→主力净流入（万元）。
+
+    :param df: 腾讯 stock_zh_a_spot_tx 返回的 DataFrame。
+    :param industry_map: code → 行业映射（可选）。
+    :returns: StockListItem 列表。
+    """
+    if df is None or df.empty:
+        return []
+
+    industry_map = industry_map or {}
+    out: list[StockListItem] = []
+
+    for _, r in df.iterrows():
+        tx_code = str(r.get("code", "")).strip()
+        if not tx_code:
+            continue
+        code = _from_tx_code(tx_code)
+        # 腾讯主力净流入 zljlr 单位为万元，转换为元
+        inflow_wan = _to_float(r.get("zljlr"))
+        inflow = inflow_wan * 1e4 if inflow_wan is not None else None
+        out.append(
+            StockListItem(
+                code=code,
+                name=str(r.get("name", "")).strip(),
+                market=_classify_market(code),
+                price=_to_float(r.get("zxj")),
+                change=_to_float(r.get("zd")),
+                change_pct=_to_float(r.get("zdf")),
+                amount=_to_float(r.get("turnover")),
+                volume=_to_float(r.get("volume")),
+                turnover_rate=_to_float(r.get("hsl")),
+                high=None,
+                low=None,
+                open=None,
+                prev_close=None,
+                main_net_inflow=inflow,
+                main_net_inflow_pct=None,
+                industry=industry_map.get(code),
+            )
+        )
+    return out
+
+
+def _tx_df_to_stock_info(df: Any, default_type: str) -> list[StockInfo]:
+    """腾讯行情 DataFrame → StockInfo 列表（用于搜索索引构建）。
+
+    :param df: 腾讯 stock_zh_a_spot_tx 返回的 DataFrame。
+    :param default_type: stock / etf。
+    :returns: StockInfo 列表。
+    """
+    if df is None or df.empty:
+        return []
+
+    out: list[StockInfo] = []
+    for _, r in df.iterrows():
+        tx_code = str(r.get("code", "")).strip()
+        if not tx_code:
+            continue
+        code = _from_tx_code(tx_code)
+        name = str(r.get("name", "")).strip()
+        out.append(
+            StockInfo(
+                code=code,
+                name=name,
+                market=_classify_market(code),
+                pinyin=make_pinyin_for_search(name),
+                type=default_type,
+            )
+        )
+    return out
+
+
+def _tx_row_to_quote(r: Any, code: str) -> Quote:
+    """腾讯单行 → Quote。
+
+    :param r: 腾讯 DataFrame 的一行。
+    :param code: 标准代码。
+    :returns: Quote 对象。
+    """
+    last = _to_float(r.get("zxj"))
+    change = _to_float(r.get("zd"))
+    change_pct = _to_float(r.get("zdf"))
+    prev = (last - change) if (last is not None and change is not None) else None
+    return Quote(
+        code=code,
+        name=str(r.get("name", code)),
+        price=last,
+        prev_close=prev,
+        change=change,
+        change_pct=change_pct,
+        volume=_to_float(r.get("volume")),
+        amount=_to_float(r.get("turnover")),
+        high=None,
+        low=None,
+        open=None,
+        timestamp=_now_str(),
+    )
