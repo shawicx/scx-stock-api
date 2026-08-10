@@ -1,15 +1,15 @@
 """
 @description LLM 客户端封装，基于 OpenAI 兼容接口，支持 GLM / DeepSeek 切换。
 
-通过 SCX_LLM_PROVIDER / SCX_LLM_BASE_URL / SCX_LLM_MODEL 环境变量配置，
-两个提供商均兼容 OpenAI Chat Completions API，统一用 openai SDK 调用。
+配置优先级：DB app_setting 表 > .env（Settings）。
+前端配置页面修改后下次调用即生效，无需重启。
 """
 
 import logging
 
 from openai import AsyncOpenAI
 
-from scx_stock.config.settings import get_settings
+from scx_stock.config.dynamic import get_dynamic_settings
 
 logger = logging.getLogger(__name__)
 
@@ -29,40 +29,36 @@ _PROVIDER_DEFAULTS = {
 class LlmClient:
     """LLM 客户端，封装 OpenAI 兼容调用。
 
-    使用 AsyncOpenAI，调用方在异步上下文中使用。
+    每次调用时动态读取配置（DB 优先，.env 回退），配置变更即时生效。
     """
 
-    def __init__(self) -> None:
-        s = get_settings()
-        defaults = _PROVIDER_DEFAULTS.get(s.llm_provider, {})
-        self.base_url = s.llm_base_url or defaults["base_url"]
-        self.model = s.llm_model or defaults["model"]
-        self.timeout = s.llm_timeout
-        self._api_key = s.llm_api_key
-        self._client: AsyncOpenAI | None = None
+    async def _get_config(self) -> dict[str, str | None]:
+        """从 DB + .env 读取当前生效的 LLM 配置。
 
-    def _get_client(self) -> AsyncOpenAI:
-        """懒加载 AsyncOpenAI 客户端。
-
-        :returns: AsyncOpenAI 实例。
+        :returns: 含 provider/api_key/base_url/model/timeout 的字典。
         """
-        if self._client is None:
-            self._client = AsyncOpenAI(
-                api_key=self._api_key,
-                base_url=self.base_url,
-                timeout=self.timeout,
-            )
-        return self._client
+        cfg = await get_dynamic_settings(
+            ["llm_provider", "llm_api_key", "llm_base_url", "llm_model", "llm_timeout"]
+        )
+        provider = cfg.get("llm_provider") or "deepseek"
+        defaults = _PROVIDER_DEFAULTS.get(provider, {})
+        return {
+            "provider": provider,
+            "api_key": cfg.get("llm_api_key") or "",
+            "base_url": cfg.get("llm_base_url") or defaults["base_url"],
+            "model": cfg.get("llm_model") or defaults["model"],
+            "timeout": int(cfg.get("llm_timeout") or 30),
+        }
 
-    @property
-    def available(self) -> bool:
+    async def available(self) -> bool:
         """LLM 是否可用（已配置 API Key）。
 
         :returns: api_key 非空时为 True。
         """
-        return bool(self._api_key)
+        cfg = await self._get_config()
+        return bool(cfg["api_key"])
 
-    async def chat(self, system: str, user: str, max_tokens: int = 300) -> str:
+    async def chat(self, system: str, user: str, max_tokens: int = 1024) -> str:
         """调用 Chat Completions，返回模型回复文本。
 
         :param system: system prompt。
@@ -71,12 +67,18 @@ class LlmClient:
         :returns: 模型回复文本。
         :raises RuntimeError: API Key 未配置或调用失败。
         """
-        if not self.available:
-            raise RuntimeError("LLM API Key 未配置（SCX_LLM_API_KEY 为空）")
+        cfg = await self._get_config()
+        api_key = cfg["api_key"]
+        if not api_key:
+            raise RuntimeError("LLM API Key 未配置")
 
-        client = self._get_client()
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=cfg["base_url"],
+            timeout=cfg["timeout"],
+        )
         resp = await client.chat.completions.create(
-            model=self.model,
+            model=cfg["model"],
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -89,14 +91,13 @@ class LlmClient:
         finish_reason = getattr(choice, "finish_reason", None)
         if finish_reason == "length":
             logger.warning(
-                "LLM 输出因 max_tokens=%d 被截断（finish_reason=length），"
-                "考虑增大 max_tokens 或精简 prompt",
+                "LLM 输出因 max_tokens=%d 被截断（finish_reason=length）",
                 max_tokens,
             )
         logger.info(
             "LLM chat ok: provider=%s model=%s tokens=%s finish=%s",
-            get_settings().llm_provider,
-            self.model,
+            cfg["provider"],
+            cfg["model"],
             getattr(resp, "usage", None),
             finish_reason,
         )

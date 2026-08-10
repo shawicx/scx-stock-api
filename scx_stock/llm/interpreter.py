@@ -74,7 +74,7 @@ async def interpret(report: AnalysisReport) -> AnalysisReport:
         return report
 
     client = get_llm_client()
-    if not client.available:
+    if not await client.available():
         logger.info("LLM 未配置，使用降级模板摘要")
         report.summary = fallback_summary(report)
         return report

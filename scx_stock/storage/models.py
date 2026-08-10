@@ -1,10 +1,11 @@
 """
-@description ORM 模型，存储慢变数据：股票/ETF 列表、历史 K 线。
+@description ORM 模型，存储慢变数据：股票/ETF 列表、历史 K 线、关注列表、分析报告、应用配置。
 """
 
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, Float, Integer, String, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from scx_stock.storage.db import Base
@@ -77,6 +78,66 @@ class StockIndustryModel(Base):
 
     code: Mapped[str] = mapped_column(String(16), primary_key=True)
     industry: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AppSettingModel(Base):
+    """应用配置表（KV 结构），存储 LLM / SMTP 等运行时可修改的配置。
+
+    运行时优先读此表，无对应 key 时回退 .env（Settings）。
+    KV 结构便于未来扩展，新增配置项无需迁移。
+    """
+
+    __tablename__ = "app_setting"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(512))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class WatchlistModel(Base):
+    """用户关注列表，定时任务分析的数据来源。
+
+    单用户工具，无需 user_id。name 在添加时从 stock 表查询补全并冗余存储，
+    避免定时任务重复联表查询。
+    """
+
+    __tablename__ = "watchlist"
+
+    code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), default="")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class AnalysisReportModel(Base):
+    """支撑位分析报告历史表，每日收盘后由 Scheduler 写入。
+
+    标量列（close/change_pct/trend/ok）拍平用于查询/排序，
+    完整结构（含 support/resistance/ma/summary）存 JSONB payload。
+    按 (code, trade_date) upsert，日内多次触发幂等覆盖。
+    """
+
+    __tablename__ = "analysis_report"
+    __table_args__ = (
+        UniqueConstraint("code", "trade_date", name="uq_report_code_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(16), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    name: Mapped[str] = mapped_column(String(64), default="")
+    close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trend: Mapped[str] = mapped_column(String(16), default="", index=True)
+    ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

@@ -4,7 +4,7 @@
 
 from fastapi import APIRouter
 
-from scx_stock.api.v1 import analysis, market, search, sector, stock
+from scx_stock.api.v1 import analysis, market, search, sector, settings, stock, watchlist
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(stock.router)
@@ -12,3 +12,5 @@ api_router.include_router(search.router)
 api_router.include_router(sector.router)
 api_router.include_router(market.router)
 api_router.include_router(analysis.router)
+api_router.include_router(watchlist.router)
+api_router.include_router(settings.router)

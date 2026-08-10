@@ -35,3 +35,4 @@ htmlcov/
 
 # 项目内部（Superpowers spec/plan）
 docs/superpowers
+.playwright-mcp/

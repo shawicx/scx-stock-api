@@ -351,13 +351,14 @@ class AkshareProvider(SyncProviderBase):
 
         :returns: StockInfo 列表（含拼音与 type=etf）。
         """
-        _, df = await self._call_with_fallback(
+        source, df = await self._call_with_fallback(
             [
                 ("em", ak.fund_etf_spot_em, {}),
                 ("ths", ak.fund_etf_spot_ths, {}),
             ],
             domain="list_etfs",
         )
+        df = _normalize_etf_columns(df, source)
         return self._df_to_stock_info(df, default_type="etf")
 
     async def list_etf_quotes(self) -> list[StockListItem]:
@@ -366,13 +367,14 @@ class AkshareProvider(SyncProviderBase):
         :returns: StockListItem 列表（market 统一为 "ETF"）。
         :raises ProviderUnavailableError: 数据源不可用。
         """
-        _, df = await self._call_with_fallback(
+        source, df = await self._call_with_fallback(
             [
                 ("em", ak.fund_etf_spot_em, {}),
                 ("ths", ak.fund_etf_spot_ths, {}),
             ],
             domain="list_etf_quotes",
         )
+        df = _normalize_etf_columns(df, source)
 
         items = self._df_to_stock_quotes(df)
         # ETF 不按代码前缀细分市场，统一标记
@@ -601,6 +603,31 @@ def _normalize_kline_columns(df: Any, source: str) -> Any:
     if not mapping or df is None or df.empty:
         return df
     return df.rename(columns=mapping)
+
+
+# ETF 列名归一化映射：同花顺源列名与东方财富完全不同，需统一
+_ETF_COLUMN_MAP_THS = {
+    "基金代码": "代码",
+    "基金名称": "名称",
+    "增长率": "涨跌幅",
+    "增长值": "涨跌额",
+}
+
+
+def _normalize_etf_columns(df: Any, source: str) -> Any:
+    """将 ETF 数据源的列名归一化。
+
+    东方财富 fund_etf_spot_em 使用中文列名（代码/名称/最新价/...），无需映射。
+    同花顺 fund_etf_spot_ths 使用 基金代码/基金名称/增长率 等不同列名，需映射；
+    且 THS 是净值口径，无实时价/开盘/最高/最低/成交量，这些字段留空即可。
+
+    :param df: AkShare 返回的 DataFrame。
+    :param source: 数据源标识（em/ths）。
+    :returns: 列名归一化后的 DataFrame。
+    """
+    if source != "ths" or df is None or df.empty:
+        return df
+    return df.rename(columns=_ETF_COLUMN_MAP_THS)
 
 
 def _classify_market(code: str) -> str:

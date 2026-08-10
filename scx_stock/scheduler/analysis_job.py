@@ -67,11 +67,18 @@ async def run_daily_analysis(
     """执行每日分析任务，可选发送邮件。
 
     :param dry_run: True 只分析不发邮件，返回结果列表。
-    :param codes: 指定分析的代码列表；为 None 时读 SCX_WATCHLIST 配置。
+    :param codes: 指定分析的代码列表；为 None 时优先读 DB watchlist，回退 .env。
     :returns: {"analyzed": N, "success": N, "failed": N, "sent": bool, "reports": [...], "elapsed": 秒}。
     """
     s = get_settings()
-    target_codes = codes if codes is not None else s.watchlist_codes()
+    if codes is not None:
+        target_codes = codes
+    else:
+        # 定时任务入口：优先读 DB watchlist，为空则回退 .env SCX_WATCHLIST
+        target_codes = await repo.list_watchlist_codes()
+        if not target_codes:
+            target_codes = s.watchlist_codes()
+
     if not target_codes:
         logger.warning("关注列表为空，跳过分析")
         return {"analyzed": 0, "success": 0, "failed": 0, "sent": False, "reports": [], "elapsed": 0}
@@ -92,6 +99,13 @@ async def run_daily_analysis(
     success = sum(1 for r in reports if r.ok)
     failed = len(reports) - success
     elapsed = round(time.time() - t0, 1)
+
+    # 分析结果落库（dry_run 也落库，仅不发邮件）
+    try:
+        saved = await repo.upsert_analysis_reports(reports)
+        logger.info("分析报告落库 %d 条", saved)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("分析报告落库失败: %s", e)
 
     sent = False
     if not dry_run:
