@@ -10,6 +10,7 @@ class SectorQuote(BaseModel):
 
     :param code: 板块代码。
     :param name: 板块名称。
+    :param label: 新浪板块 label（用于成分股查询 fallback，仅新浪源有值）。
     :param price: 最新价。
     :param change: 涨跌额。
     :param change_pct: 涨跌幅（%）。
@@ -23,6 +24,7 @@ class SectorQuote(BaseModel):
 
     code: str
     name: str
+    label: str | None = None
     price: float | None = None
     change: float | None = None
     change_pct: float | None = None

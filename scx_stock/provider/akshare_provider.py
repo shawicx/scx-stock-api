@@ -14,6 +14,7 @@ import akshare as ak
 
 from scx_stock.exceptions.provider import ProviderError, ProviderUnavailableError
 from scx_stock.provider.base import SyncProviderBase
+from scx_stock.schema.gold import GoldQuote
 from scx_stock.schema.index import IndexQuote
 from scx_stock.schema.kline import Kline, KlineBar
 from scx_stock.schema.sector import SectorQuote
@@ -36,11 +37,14 @@ class AkshareProvider(SyncProviderBase):
         self,
         sources: list[tuple[str, Callable[..., Any], dict[str, Any]]],
         domain: str,
+        validate: Callable[[Any], bool] | None = None,
     ) -> tuple[str, Any]:
         """按优先级尝试多个数据源函数，第一个成功就返回。
 
         :param sources: (数据源名, 函数, kwargs) 列表，按优先级排序。
         :param domain: 领域标识（用于日志）。
+        :param validate: 可选的结果有效性校验回调。返回 False 时视为失败继续 fallback。
+                         用于处理"拉到空 DataFrame / 列名不匹配"等静默失败场景。
         :returns: (数据源名, 返回值) 元组，数据源名用于选择字段映射逻辑。
         :raises ProviderUnavailableError: 所有数据源均失败。
         """
@@ -48,6 +52,13 @@ class AkshareProvider(SyncProviderBase):
         for i, (source_name, func, kwargs) in enumerate(sources):
             try:
                 result = await self._run(func, **kwargs)
+                # 结果有效性校验：不通过则视为失败继续 fallback
+                if validate is not None and not validate(result):
+                    logger.warning(
+                        "%s source %s returned invalid result, trying next",
+                        domain, source_name,
+                    )
+                    continue
                 if i > 0:
                     logger.info("%s fallback to %s succeeded", domain, source_name)
                 return source_name, result
@@ -101,6 +112,7 @@ class AkshareProvider(SyncProviderBase):
                 ("tx", ak.stock_zh_a_spot_tx, {}),
             ],
             domain="get_quote",
+            validate=_validate_df_with_columns("代码", "code"),
         )
 
         if df is None or df.empty:
@@ -216,7 +228,11 @@ class AkshareProvider(SyncProviderBase):
                                                 "start_date": "20200101", "end_date": "20501231"}),
             ]
 
-        source, df = await self._call_with_fallback(sources, domain=f"get_kline({code})")
+        source, df = await self._call_with_fallback(
+            sources,
+            domain=f"get_kline({code})",
+            validate=_validate_df_with_columns("日期", "date"),
+        )
         return _normalize_kline_columns(df, source)
 
     async def list_stocks(self) -> list[StockInfo]:
@@ -231,6 +247,7 @@ class AkshareProvider(SyncProviderBase):
                 ("tx", ak.stock_zh_a_spot_tx, {}),
             ],
             domain="list_stocks",
+            validate=_validate_df_with_columns("代码", "code"),
         )
         if source == "tx":
             return _tx_df_to_stock_info(df, default_type="stock")
@@ -260,6 +277,7 @@ class AkshareProvider(SyncProviderBase):
                 ("tx", ak.stock_zh_a_spot_tx, {}),
             ],
             domain="list_stock_quotes",
+            validate=_validate_df_with_columns("代码", "code"),
         )
 
         if industry_map is None:
@@ -357,6 +375,7 @@ class AkshareProvider(SyncProviderBase):
                 ("ths", ak.fund_etf_spot_ths, {}),
             ],
             domain="list_etfs",
+            validate=_validate_df_with_columns("代码", "基金代码"),
         )
         df = _normalize_etf_columns(df, source)
         return self._df_to_stock_info(df, default_type="etf")
@@ -373,6 +392,7 @@ class AkshareProvider(SyncProviderBase):
                 ("ths", ak.fund_etf_spot_ths, {}),
             ],
             domain="list_etf_quotes",
+            validate=_validate_df_with_columns("代码", "基金代码"),
         )
         df = _normalize_etf_columns(df, source)
 
@@ -415,12 +435,13 @@ class AkshareProvider(SyncProviderBase):
         :returns: SectorQuote 列表。
         :raises ProviderUnavailableError: 数据源不可用。
         """
-        _, df = await self._call_with_fallback(
+        source, df = await self._call_with_fallback(
             [
                 ("em", ak.stock_board_industry_name_em, {}),
                 ("sina", ak.stock_sector_spot, {"indicator": "新浪行业"}),
             ],
             domain="list_sectors",
+            validate=_validate_df_with_columns("板块名称", "板块"),
         )
 
         if df is None or df.empty:
@@ -428,51 +449,85 @@ class AkshareProvider(SyncProviderBase):
 
         out: list[SectorQuote] = []
         for _, r in df.iterrows():
-            out.append(
-                SectorQuote(
-                    code=str(r.get("板块代码", "")).strip(),
-                    name=str(r.get("板块名称", "")).strip(),
-                    price=_to_float(r.get("最新价")),
-                    change=_to_float(r.get("涨跌额")),
-                    change_pct=_to_float(r.get("涨跌幅")),
-                    total_market_cap=_to_float(r.get("总市值")),
-                    turnover_rate=_to_float(r.get("换手率")),
-                    up_count=_to_int(r.get("上涨家数")),
-                    down_count=_to_int(r.get("下跌家数")),
-                    leading_stock=str(r.get("领涨股票") or "").strip() or None,
-                    leading_stock_change_pct=_to_float(r.get("领涨股票-涨跌幅")),
+            if source == "sina":
+                out.append(
+                    SectorQuote(
+                        code=str(r.get("label", "")).strip(),
+                        name=str(r.get("板块", "")).strip(),
+                        label=str(r.get("label", "")).strip(),
+                        price=_to_float(r.get("平均价格")),
+                        change=_to_float(r.get("涨跌额")),
+                        change_pct=_to_float(r.get("涨跌幅")),
+                        up_count=_to_int(r.get("公司家数")),
+                        leading_stock=str(r.get("股票名称") or "").strip() or None,
+                    )
                 )
-            )
+            else:
+                out.append(
+                    SectorQuote(
+                        code=str(r.get("板块代码", "")).strip(),
+                        name=str(r.get("板块名称", "")).strip(),
+                        price=_to_float(r.get("最新价")),
+                        change=_to_float(r.get("涨跌额")),
+                        change_pct=_to_float(r.get("涨跌幅")),
+                        total_market_cap=_to_float(r.get("总市值")),
+                        turnover_rate=_to_float(r.get("换手率")),
+                        up_count=_to_int(r.get("上涨家数")),
+                        down_count=_to_int(r.get("下跌家数")),
+                        leading_stock=str(r.get("领涨股票") or "").strip() or None,
+                        leading_stock_change_pct=_to_float(r.get("领涨股票-涨跌幅")),
+                    )
+                )
         return out
 
-    async def get_sector_constituents(self, sector_name: str) -> list[dict[str, str]]:
-        """获取板块成分股（按板块名称，如 "小金属"）。
+    async def get_sector_constituents(
+        self, sector_name: str, sector_label: str = ""
+    ) -> list[dict[str, str]]:
+        """获取板块成分股（东方财富 → 新浪 fallback）。
 
-        仅支持东方财富源（新浪接口按概念代码查询，参数语义不同）。
-        主要用于 Scheduler 定时同步行业映射（本地/非高峰期，反爬风险低）。
+        东方财富按板块名称查询（如 "小金属"），新浪按 label 查询（如 "new_xjsc"）。
+        先尝试东方财富，失败后用新浪 label（需调用方提供）。
 
         :param sector_name: 板块名称（东方财富行业板块名）。
+        :param sector_label: 新浪板块 label（可选，用于 fallback）。
         :returns: 成分股列表，每项含 code / name。
-        :raises ProviderError: 数据源异常或板块不存在。
         """
-        try:
-            df = await self._run(ak.stock_board_industry_cons_em, symbol=sector_name)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("akshare get_sector_constituents failed: %s", e)
-            raise ProviderUnavailableError(
-                f"akshare sector constituents unavailable: {sector_name}"
-            ) from e
+        # 构造 fallback 链
+        sources: list[tuple[str, Callable[..., Any], dict[str, Any]]] = [
+            ("em", ak.stock_board_industry_cons_em, {"symbol": sector_name}),
+        ]
+        if sector_label:
+            sources.append(
+                ("sina", ak.stock_sector_detail, {"sector": sector_label})
+            )
 
-        if df is None or df.empty:
+        try:
+            source, df = await self._call_with_fallback(
+                sources,
+                domain=f"get_sector_constituents({sector_name})",
+                validate=lambda d: d is not None and not d.empty,
+            )
+        except ProviderUnavailableError:
             return []
 
-        out: list[dict[str, str]] = []
+        if source == "sina":
+            # 新浪源列名：symbol / code / name
+            out: list[dict[str, str]] = []
+            for _, r in df.iterrows():
+                code = str(r.get("code", "")).strip()
+                if not code:
+                    continue
+                out.append({"code": code, "name": str(r.get("name", "")).strip()})
+            return out
+
+        # 东方财富源列名：代码 / 名称
+        out2: list[dict[str, str]] = []
         for _, r in df.iterrows():
             code = str(r.get("代码", "")).strip()
             if not code:
                 continue
-            out.append({"code": code, "name": str(r.get("名称", "")).strip()})
-        return out
+            out2.append({"code": code, "name": str(r.get("名称", "")).strip()})
+        return out2
 
     async def list_indexes(self, group: str = "沪深重要指数") -> list[IndexQuote]:
         """获取指数实时行情列表（东方财富 → 新浪 fallback）。
@@ -487,6 +542,7 @@ class AkshareProvider(SyncProviderBase):
                 ("sina", ak.stock_zh_index_spot_sina, {}),
             ],
             domain="list_indexes",
+            validate=_validate_df_with_columns("代码", "code"),
         )
 
         if df is None or df.empty:
@@ -511,6 +567,193 @@ class AkshareProvider(SyncProviderBase):
                 )
             )
         return out
+
+    async def list_gold_quotes(self) -> list[GoldQuote]:
+        """获取国内黄金品种实时行情（沪金主连 + 上金所现货 + 纽约金跟踪）。
+
+        三个品种独立容错，单个失败不影响其他：
+          - AU0（沪金主连）：``futures_zh_realtime(symbol='黄金')`` 过滤 symbol=AU0
+          - Au99.99（上金所现货）：``spot_quotations_sge()`` 取最新分时
+          - NYAuTN06（纽约金跟踪）：``spot_hist_sge(symbol='NYAuTN06')`` 取最后一行
+
+        注意：期货接口的 changepercent 返回小数（0.015 表示 1.5%），需 ×100。
+
+        :returns: GoldQuote 列表（最多 3 个品种）。
+        """
+        results: list[GoldQuote] = []
+
+        # 1. 沪金主连 AU0
+        au0 = await self._fetch_au0_quote()
+        if au0:
+            results.append(au0)
+
+        # 2. 上金所现货 Au99.99
+        sge = await self._fetch_sge_spot_quote("Au99.99", "上金所Au99.99")
+        if sge:
+            results.append(sge)
+
+        # 3. 纽约金跟踪 NYAuTN06
+        ny = await self._fetch_sge_hist_quote("NYAuTN06", "纽约金TN06")
+        if ny:
+            results.append(ny)
+
+        return results
+
+    async def _fetch_au0_quote(self) -> GoldQuote | None:
+        """获取沪金主连 AU0 实时盘口。
+
+        :returns: GoldQuote 或 None（失败时容错返回 None）。
+        """
+        try:
+            df = await self._run(ak.futures_zh_realtime, symbol="黄金")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("获取沪金期货行情失败: %s", e)
+            return None
+
+        if df is None or df.empty:
+            return None
+
+        row = df[df["symbol"] == "AU0"]
+        if row.empty:
+            return None
+        r = row.iloc[0]
+        price = _to_float(r.get("trade"))
+        prev_close = _to_float(r.get("preclose"))
+        change = _to_float(r.get("trade", 0)) - (prev_close or 0) if price and prev_close else None
+        # changepercent 返回小数，需 ×100 转为百分数
+        change_pct_raw = _to_float(r.get("changepercent"))
+        change_pct = change_pct_raw * 100 if change_pct_raw is not None else None
+
+        return GoldQuote(
+            code="AU0",
+            name="沪金主连",
+            category="futures_shfe",
+            price=price,
+            change=change,
+            change_pct=change_pct,
+            prev_close=prev_close,
+            prev_settlement=_to_float(r.get("prevsettlement")),
+            open=_to_float(r.get("open")),
+            high=_to_float(r.get("high")),
+            low=_to_float(r.get("low")),
+            volume=_to_float(r.get("volume")),
+            position=_to_float(r.get("position")),
+            timestamp=f"{r.get('tradedate', '')} {r.get('ticktime', '')}".strip(),
+        )
+
+    async def _fetch_sge_spot_quote(
+        self, symbol: str, name: str
+    ) -> GoldQuote | None:
+        """获取上金所现货品种实时分时最新数据。
+
+        spot_quotations_sge 返回列：品种/时间/现价/更新时间
+
+        :param symbol: 品种代码（如 Au99.99）。
+        :param name: 展示名称。
+        :returns: GoldQuote 或 None。
+        """
+        try:
+            df = await self._run(ak.spot_quotations_sge)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("获取上金所现货行情失败: %s", e)
+            return None
+
+        if df is None or df.empty:
+            return None
+
+        # 该接口返回全品种分时，需过滤目标品种
+        if "品种" in df.columns:
+            df = df[df["品种"] == symbol]
+        if df.empty:
+            return None
+
+        r = df.iloc[-1]  # 最新一根分时
+        price = _to_float(r.get("现价"))
+        update_time = str(r.get("更新时间", ""))
+
+        return GoldQuote(
+            code=symbol,
+            name=name,
+            category="spot_sge",
+            price=price,
+            change=None,
+            change_pct=None,
+            prev_close=None,
+            open=None,
+            high=None,
+            low=None,
+            volume=None,
+            position=None,
+            timestamp=update_time,
+        )
+
+    async def _fetch_sge_hist_quote(
+        self, symbol: str, name: str
+    ) -> GoldQuote | None:
+        """获取上金所品种历史日 K 的最新一行（用于 NYAuTN06 等无实时接口的品种）。
+
+        :param symbol: 品种代码（如 NYAuTN06）。
+        :param name: 展示名称。
+        :returns: GoldQuote 或 None。
+        """
+        try:
+            df = await self._run(ak.spot_hist_sge, symbol=symbol)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("获取上金所历史行情失败 %s: %s", symbol, e)
+            return None
+
+        if df is None or df.empty:
+            return None
+
+        r = df.iloc[-1]  # 最新一行
+        price = _to_float(r.get("close"))
+        open = _to_float(r.get("open"))
+
+        return GoldQuote(
+            code=symbol,
+            name=name,
+            category="comex_proxy",
+            price=price,
+            change=None,
+            change_pct=None,
+            prev_close=None,
+            prev_settlement=None,
+            open=open,
+            high=_to_float(r.get("high")),
+            low=_to_float(r.get("low")),
+            volume=None,
+            position=None,
+            timestamp=str(r.get("date", "")),
+        )
+
+
+def _validate_non_empty_df(df: Any) -> bool:
+    """通用 DataFrame 有效性校验：非 None、非空。
+
+    用于 _call_with_fallback 的 validate 回调，防御"拉到空 DataFrame"
+    的静默失败场景（如 ETF 同步 bug 的根因）。
+
+    :param df: 待校验的 DataFrame。
+    :returns: 有效返回 True。
+    """
+    return df is not None and hasattr(df, "empty") and not df.empty
+
+
+def _validate_df_with_columns(*required_cols: str) -> Callable[[Any], bool]:
+    """构造一个校验函数，要求 DataFrame 非空且包含至少一个候选列名。
+
+    不同数据源的列名可能不同（如东方财富"代码"vs 腾讯"code"），
+    传入多组候选列名，只要 DataFrame 含任一候选即通过。
+
+    :param required_cols: 候选列名列表。
+    :returns: 校验函数。
+    """
+    def _check(df: Any) -> bool:
+        if not _validate_non_empty_df(df):
+            return False
+        columns = set(str(c) for c in df.columns)
+        return any(col in columns for col in required_cols)
+    return _check
 
 
 def _to_float(v: Any) -> float | None:

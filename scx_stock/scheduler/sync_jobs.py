@@ -170,7 +170,10 @@ async def sync_stock_industries() -> dict[str, int]:
     rows: list[dict[str, str]] = []
     for sector in sectors:
         try:
-            constituents = await provider.get_sector_constituents(sector.name)
+            # 传入 label 供新浪源 fallback 使用
+            constituents = await provider.get_sector_constituents(
+                sector.name, sector_label=sector.label or sector.code
+            )
         except Exception as e:  # noqa: BLE001
             logger.debug("sync_stock_industries skip sector %s: %s", sector.name, e)
             continue

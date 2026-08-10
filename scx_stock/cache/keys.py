@@ -75,6 +75,14 @@ def index_list(group: str) -> str:
     return f"{PREFIX}:index:list:{group}"
 
 
+def gold_quotes() -> str:
+    """黄金品种行情列表缓存键。
+
+    :returns: 缓存键。
+    """
+    return f"{PREFIX}:gold:quotes"
+
+
 def rate_limit(scope: str, identity: str) -> str:
     """限流计数缓存键。
 

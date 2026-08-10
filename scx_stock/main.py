@@ -13,7 +13,7 @@ from scx_stock.api.router import api_router
 from scx_stock.cache.backend import get_cache
 from scx_stock.config.settings import get_settings
 from scx_stock.scheduler.runner import get_scheduler
-from scx_stock.scheduler.sync_jobs import rebuild_search_index, sync_all
+from scx_stock.scheduler.sync_jobs import rebuild_search_index
 from scx_stock.schema.common import ok
 from scx_stock.storage.db import close_db, init_db
 
@@ -112,38 +112,53 @@ def _register_health(app: FastAPI) -> None:
 
 
 def _register_admin(app: FastAPI) -> None:
-    """注册运维端点：手动触发同步 / 重建索引。
+    """注册运维端点：手动触发同步 / 重建索引（异步任务模式）+ 任务状态查询。
 
     :param app: FastAPI 应用。
     """
+    from scx_stock.scheduler.sync_jobs import (
+        rebuild_search_index,
+        sync_etf_list,
+        sync_stock_industries,
+        sync_stock_list,
+    )
+    from scx_stock.scheduler.task_manager import TaskHandle, get_task_manager
 
-    @app.post("/admin/sync", tags=["运维"], summary="手动触发全量同步")
-    async def _manual_sync() -> dict[str, object]:
-        """手动触发：股票列表 → ETF 列表 → 重建索引。
+    async def _run_sync_all(handle: TaskHandle) -> dict[str, int]:
+        """带进度上报的串行同步（股票→ETF→行业→索引）。
 
-        各步独立容错：某步失败不影响后续。返回 data 含每步计数与耗时。
-        仅当 sync_all 整体抛异常（非预期）时才返回 code 非 0。
-
-        :returns: 统一响应，data 为 {stock_count, etf_count, index_size}。
+        :param handle: 任务句柄，用于更新进度。
+        :returns: 汇总计数。
         """
-        import time
+        handle.update_progress("正在同步股票列表")
+        r1 = await sync_stock_list()
+        handle.update_progress(f"股票列表完成（{r1.get('stock_count', 0)}），正在同步 ETF 列表")
+        r2 = await sync_etf_list()
+        handle.update_progress(f"ETF 列表完成（{r2.get('etf_count', 0)}），正在同步行业映射")
+        r3 = await sync_stock_industries()
+        handle.update_progress(
+            f"行业映射完成（{r3.get('industry_count', 0)}），正在重建搜索索引"
+        )
+        r4 = await rebuild_search_index()
+        handle.update_progress(f"索引重建完成（{r4.get('index_size', 0)}）")
+        return {**r1, **r2, **r3, **r4}
 
-        t0 = time.time()
-        try:
-            result = await sync_all()
-            logger.info("manual sync completed in %.1fs: %s", time.time() - t0, result)
-            return ok(result)
-        except Exception as e:  # noqa: BLE001
-            logger.exception("manual sync failed after %.1fs", time.time() - t0)
-            return {
-                "code": 1,
-                "message": f"sync failed after {time.time()-t0:.1f}s: {type(e).__name__}: {e}",
-                "data": None,
-            }
+    @app.post("/admin/sync", tags=["运维"], summary="手动触发全量同步（异步）")
+    async def _manual_sync() -> dict[str, object]:
+        """提交全量同步后台任务，立即返回 task_id。
+
+        任务串行执行：股票列表 → ETF 列表 → 行业映射 → 重建索引。
+        通过 ``GET /admin/task/{task_id}`` 轮询进度。
+
+        :returns: 统一响应，data 含 task_id。
+        """
+        tm = get_task_manager()
+        task_id = tm.submit("全量同步", _run_sync_all)
+        return ok({"task_id": task_id})
 
     @app.post("/admin/reindex", tags=["运维"], summary="仅重建搜索索引")
     async def _manual_reindex() -> dict[str, object]:
-        """从 DB 重建内存搜索索引（不拉取数据源）。
+        """从 DB 重建内存搜索索引（不拉取数据源，秒级完成）。
 
         :returns: 统一响应，data 为索引大小；DB 不可用时 code 非 0。
         """
@@ -153,6 +168,19 @@ def _register_admin(app: FastAPI) -> None:
         except Exception as e:  # noqa: BLE001
             logger.exception("manual reindex failed")
             return {"code": 1, "message": f"reindex failed: {e}", "data": None}
+
+    @app.get("/admin/task/{task_id}", tags=["运维"], summary="查询任务状态")
+    async def _get_task_status(task_id: str) -> dict[str, object]:
+        """查询后台任务的当前状态与进度。
+
+        :param task_id: 任务 ID。
+        :returns: 统一响应，data 为任务状态信息。
+        """
+        tm = get_task_manager()
+        info = tm.get(task_id)
+        if info is None:
+            return {"code": 1, "message": f"task not found: {task_id}", "data": None}
+        return ok(info.model_dump(mode="json"))
 
 
 def create_app() -> FastAPI:
