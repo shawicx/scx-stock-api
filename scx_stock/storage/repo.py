@@ -11,10 +11,13 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from scx_stock.schema.analysis import AnalysisReport
+from scx_stock.schema.kline import Kline, KlineBar
 from scx_stock.storage.db import get_session_factory
 from scx_stock.storage.models import (
     AnalysisReportModel,
     AppSettingModel,
+    KlineModel,
+    MarketCalendarModel,
     StockIndustryModel,
     StockModel,
     WatchlistModel,
@@ -394,3 +397,153 @@ async def load_report_history(code: str, limit: int = 30) -> list[AnalysisReport
     except Exception as e:  # noqa: BLE001
         logger.warning("load_report_history failed: %s", e)
         return []
+
+
+# ---------------------------------------------------------------------------
+# K 线（kline）
+# ---------------------------------------------------------------------------
+
+
+async def upsert_klines(rows: Iterable[dict[str, Any]]) -> int:
+    """批量 upsert K 线数据，按 (code, trade_date) 覆盖。
+
+    :param rows: 字典迭代，需含 code / trade_date / open / close / high / low / volume。
+    :returns: 写入条数。
+    """
+    rows = list(rows)
+    if not rows:
+        return 0
+
+    factory = get_session_factory()
+    async with factory() as session:
+        stmt = pg_insert(KlineModel).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_kline_code_date",
+            set_={
+                "open": stmt.excluded.open,
+                "close": stmt.excluded.close,
+                "high": stmt.excluded.high,
+                "low": stmt.excluded.low,
+                "volume": stmt.excluded.volume,
+            },
+        )
+        await session.execute(stmt)
+        await session.commit()
+    return len(rows)
+
+
+async def load_kline(code: str, days: int = 120) -> Kline | None:
+    """从 DB 读取某标的最近 N 根日 K 线，构造 Kline 对象。
+
+    DB 无数据或不足时返回 None（调用方回退 Provider 拉取）。
+
+    :param code: 证券代码。
+    :param days: 返回的最近交易日数量。
+    :returns: Kline 对象或 None。
+    """
+    factory = get_session_factory()
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                select(KlineModel)
+                .where(KlineModel.code == code)
+                .order_by(KlineModel.trade_date.desc())
+                .limit(days)
+            )
+            models = list(result.scalars().all())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("load_kline failed for %s: %s", code, e)
+        return None
+
+    if not models:
+        return None
+
+    # DB 是按日期降序取的，反转为升序（与 Provider.get_kline 一致）
+    models.reverse()
+    bars = [
+        KlineBar(
+            trade_date=m.trade_date,
+            open=m.open,
+            close=m.close,
+            high=m.high,
+            low=m.low,
+            volume=m.volume,
+        )
+        for m in models
+    ]
+    return Kline(code=code, bars=bars)
+
+
+async def get_kline_last_date(code: str) -> date | None:
+    """查某 code 在 DB 中的最大交易日（增量同步起点）。
+
+    :param code: 证券代码。
+    :returns: 最大交易日，DB 无数据返回 None。
+    """
+    factory = get_session_factory()
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                select(func.max(KlineModel.trade_date)).where(
+                    KlineModel.code == code
+                )
+            )
+            return result.scalar_one_or_none()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("get_kline_last_date failed for %s: %s", code, e)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 交易日历（market_calendar）
+# ---------------------------------------------------------------------------
+
+
+async def upsert_calendar(rows: Iterable[dict[str, Any]]) -> int:
+    """批量 upsert 交易日历。
+
+    :param rows: 字典迭代，需含 trade_date / is_open。
+    :returns: 写入条数。
+    """
+    rows = list(rows)
+    if not rows:
+        return 0
+
+    factory = get_session_factory()
+    async with factory() as session:
+        stmt = pg_insert(MarketCalendarModel).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["trade_date"], set_={"is_open": stmt.excluded.is_open}
+        )
+        await session.execute(stmt)
+        await session.commit()
+    return len(rows)
+
+
+async def is_trading_day(d: date | None = None) -> bool:
+    """判断某天是否为交易日（DB market_calendar 有记录且 is_open=True）。
+
+    DB 不可用或无记录时回退为星期判断（周一至五 True）。
+
+    :param d: 日期，默认今天。
+    :returns: 是否交易日。
+    """
+    if d is None:
+        d = date.today()
+
+    factory = get_session_factory()
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                select(MarketCalendarModel.is_open).where(
+                    MarketCalendarModel.trade_date == d
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is not None:
+                return bool(row)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("is_trading_day DB query failed: %s", e)
+
+    # DB 无记录时回退为星期判断
+    return d.weekday() < 5

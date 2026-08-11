@@ -154,11 +154,19 @@ async def test_provider_list_etf_quotes_maps_columns():
 
 @pytest.mark.asyncio
 async def test_provider_list_stock_quotes_empty_df():
-    """空 DataFrame 返回空列表，不报错。"""
+    """全部数据源返回空 DataFrame 时，validate 校验拦截并抛 ProviderUnavailableError。"""
+    import pytest
+    from scx_stock.exceptions.provider import ProviderUnavailableError
+
     provider = AkshareProvider()
-    with patch("akshare.stock_zh_a_spot_em", return_value=pd.DataFrame()):
-        result = await provider.list_stock_quotes()
-    assert result == []
+    # mock 全部 fallback 源为空（em/sina/tx 三源都会被 validate 判定无效）
+    with (
+        patch("akshare.stock_zh_a_spot_em", return_value=pd.DataFrame()),
+        patch("akshare.stock_zh_a_spot", return_value=pd.DataFrame()),
+        patch("akshare.stock_zh_a_spot_tx", return_value=pd.DataFrame()),
+    ):
+        with pytest.raises(ProviderUnavailableError):
+            await provider.list_stock_quotes()
 
 
 # ---------- 缓存键 ----------

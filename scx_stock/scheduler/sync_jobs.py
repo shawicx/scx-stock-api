@@ -200,6 +200,120 @@ async def sync_stock_industries() -> dict[str, int]:
     return {"industry_count": written}
 
 
+async def sync_kline(codes: list[str] | None = None) -> dict[str, int]:
+    """增量同步关注列表的日 K 线到 DB。
+
+    codes 为 None 时读 DB watchlist + .env 回退。
+    对每个 code：查 DB 最大 trade_date → 增量拉取 → upsert 落库。
+    若 DB 无此 code 数据，拉最近 120 日全量初始化。
+
+    :param codes: 代码列表，None 时读关注列表。
+    :returns: {"synced": N, "failed": N}。
+    """
+    import time
+
+    from scx_stock.config.settings import get_settings
+
+    t0 = time.time()
+
+    # 获取目标代码列表
+    if codes is None:
+        codes = await repo.list_watchlist_codes()
+        if not codes:
+            s = get_settings()
+            codes = s.watchlist_codes()
+
+    if not codes:
+        logger.warning("sync_kline: 关注列表为空，跳过")
+        return {"synced": 0, "failed": 0}
+
+    provider = AkshareProvider()
+    synced = 0
+    failed = 0
+
+    for code in codes:
+        try:
+            # 查 DB 最大交易日，决定是增量还是全量
+            last_date = await repo.get_kline_last_date(code)
+            if last_date:
+                # 增量：从 last_date 开始拉
+                kline = await provider.get_kline(code, days=0)  # days=0 不截断
+                # 过滤出 last_date 之后的数据
+                new_bars = [b for b in kline.bars if b.trade_date > last_date]
+            else:
+                # 全量初始化：拉最近 120 日
+                kline = await provider.get_kline(code, days=120)
+                new_bars = kline.bars
+
+            if not new_bars:
+                logger.debug("sync_kline %s: 无新数据", code)
+                synced += 1
+                continue
+
+            rows = [
+                {
+                    "code": code,
+                    "trade_date": b.trade_date,
+                    "open": b.open,
+                    "close": b.close,
+                    "high": b.high,
+                    "low": b.low,
+                    "volume": b.volume,
+                }
+                for b in new_bars
+            ]
+            written = await repo.upsert_klines(rows)
+            logger.info("sync_kline %s: 写入 %d 根（last_date=%s）", code, written, last_date)
+            synced += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning("sync_kline %s failed: %s", code, e)
+            failed += 1
+
+    logger.info(
+        "sync_kline done: %d synced, %d failed in %.1fs",
+        synced, failed, time.time() - t0,
+    )
+    return {"synced": synced, "failed": failed}
+
+
+async def sync_market_calendar() -> dict[str, int]:
+    """同步交易日历到 DB（新浪 tool_trade_date_hist_sina）。
+
+    数据源返回 1990-2026 全量交易日（~8797 行），upsert 到 market_calendar 表。
+
+    :returns: {"calendar_count": N}。
+    """
+    import time
+
+    import akshare as ak
+
+    t0 = time.time()
+    try:
+        df = await AkshareProvider()._run(ak.tool_trade_date_hist_sina)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("sync_market_calendar fetch failed: %s", e)
+        return {"calendar_count": 0}
+
+    if df is None or df.empty:
+        return {"calendar_count": 0}
+
+    rows = [
+        {"trade_date": d, "is_open": True}
+        for d in df["trade_date"]
+    ]
+    try:
+        written = await repo.upsert_calendar(rows)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("sync_market_calendar db write failed: %s", e)
+        return {"calendar_count": 0}
+
+    logger.info(
+        "sync_market_calendar done: %d trade dates in %.1fs",
+        written, time.time() - t0,
+    )
+    return {"calendar_count": written}
+
+
 async def sync_all() -> dict[str, int]:
     """串行执行：股票列表 → ETF 列表 → 行业映射 → 重建索引。
 

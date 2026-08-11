@@ -24,7 +24,8 @@ async def _analyze_one(
 ) -> AnalysisReport:
     """分析单只标的：拉 K 线 → 计算支撑位 → AI 解读。
 
-    任何步骤失败都返回 ok=False 的 report，不抛异常。
+    K 线优先从 DB 读取（sync_kline 定时任务预置），DB 不足时回退 Provider 拉取
+    并顺带落库。任何步骤失败都返回 ok=False 的 report，不抛异常。
 
     :param provider: AkShare Provider 实例。
     :param code: 证券代码。
@@ -32,11 +33,36 @@ async def _analyze_one(
     :param name: 标的名称（来自 DB 或调用方），回填到 report。
     :returns: AnalysisReport。
     """
-    try:
-        kline = await provider.get_kline(code, days=days)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("拉取 K 线失败 %s: %s", code, e)
-        return AnalysisReport(code=code, name=name, ok=False, error=f"拉取 K 线失败: {e}")
+    # 1. 优先从 DB 读 K 线
+    kline = await repo.load_kline(code, days)
+    used_db = kline is not None and len(kline.bars) >= 30
+
+    if not used_db:
+        # 2. DB 不足时回退 Provider 拉取
+        try:
+            kline = await provider.get_kline(code, days=days)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("拉取 K 线失败 %s: %s", code, e)
+            return AnalysisReport(code=code, name=name, ok=False, error=f"拉取 K 线失败: {e}")
+
+        # 3. 顺带落库（容错，不阻断分析）
+        try:
+            rows = [
+                {
+                    "code": code,
+                    "trade_date": b.trade_date,
+                    "open": b.open,
+                    "close": b.close,
+                    "high": b.high,
+                    "low": b.low,
+                    "volume": b.volume,
+                }
+                for b in kline.bars
+            ]
+            await repo.upsert_klines(rows)
+            logger.info("K 线回填 DB %s: %d 根", code, len(rows))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("K 线回填 DB 失败 %s: %s", code, e)
 
     kline.name = name  # 透传名称到分析结果
     report = analyze(kline)
@@ -138,6 +164,13 @@ async def run_daily_analysis(
 async def daily_analysis_job() -> dict:
     """Scheduler 定时任务入口（非 dry_run，发送邮件）。
 
+    非交易日（周末/节假日）自动跳过，避免无意义的分析+邮件。
+
     :returns: 分析结果汇总。
     """
+    # 交易日历门控：非交易日跳过
+    if not await repo.is_trading_day():
+        logger.info("今日非交易日，跳过分析")
+        return {"analyzed": 0, "success": 0, "failed": 0, "sent": False, "skipped": True}
+
     return await run_daily_analysis(dry_run=False)

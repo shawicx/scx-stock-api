@@ -13,6 +13,8 @@ from scx_stock.scheduler.sync_jobs import (
     rebuild_search_index,
     sync_all,
     sync_etf_list,
+    sync_kline,
+    sync_market_calendar,
     sync_stock_industries,
 )
 from scx_stock.scheduler.analysis_job import daily_analysis_job
@@ -24,6 +26,8 @@ logger = logging.getLogger(__name__)
 #   - 每日 09:10 同步 ETF 列表
 #   - 每日 09:15 同步行业映射
 #   - 每日 09:20 重建搜索索引
+#   - 每周一 06:00 同步交易日历
+#   - 每日 16:00 增量同步关注列表的 K 线（收盘后、分析前）
 #   - 每日 21:00 执行支撑位分析并发邮件（cron 来自 SCX_ANALYSIS_CRON）
 DEFAULT_SCHEDULE = {
     "sync_stock_list": {"cron": "0 9 * * 1-5", "func_name": "sync_stock_list"},
@@ -32,6 +36,14 @@ DEFAULT_SCHEDULE = {
     "rebuild_search_index": {
         "cron": "20 9 * * 1-5",
         "func_name": "rebuild_search_index",
+    },
+    "sync_market_calendar": {
+        "cron": "0 6 * * 1",  # 每周一 06:00
+        "func_name": "sync_market_calendar",
+    },
+    "sync_kline": {
+        "cron": "0 16 * * 1-5",  # 每个交易日 16:00（收盘后、分析前）
+        "func_name": "sync_kline",
     },
     "daily_analysis": {"cron": None, "func_name": "daily_analysis"},  # cron 动态取自 Settings
 }
@@ -42,6 +54,8 @@ _JOB_REGISTRY: dict[str, Any] = {
     "sync_etf_list": sync_etf_list,
     "sync_stock_industries": sync_stock_industries,
     "rebuild_search_index": rebuild_search_index,
+    "sync_market_calendar": sync_market_calendar,
+    "sync_kline": sync_kline,
     "daily_analysis": daily_analysis_job,
 }
 
