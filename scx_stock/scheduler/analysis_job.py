@@ -13,6 +13,7 @@ from scx_stock.config.dynamic import get_dynamic_settings
 from scx_stock.llm.interpreter import interpret
 from scx_stock.notify.email_sender import render_daily_report, send_email
 from scx_stock.provider.akshare_provider import AkshareProvider
+from scx_stock.storage import repo
 from scx_stock.schema.analysis import AnalysisReport
 
 logger = logging.getLogger(__name__)
@@ -53,8 +54,6 @@ async def _resolve_names(codes: list[str]) -> dict[str, str]:
     :returns: {code: name} 字典。
     """
     try:
-        from scx_stock.storage import repo
-
         models = await repo.load_all_stocks()
         return {m.code: m.name for m in models if m.code in codes}
     except Exception as e:  # noqa: BLE001
