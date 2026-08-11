@@ -9,6 +9,7 @@ import time
 
 from scx_stock.analysis.engine import analyze
 from scx_stock.config.settings import get_settings
+from scx_stock.config.dynamic import get_dynamic_settings
 from scx_stock.llm.interpreter import interpret
 from scx_stock.notify.email_sender import render_daily_report, send_email
 from scx_stock.provider.akshare_provider import AkshareProvider
@@ -109,12 +110,17 @@ async def run_daily_analysis(
 
     sent = False
     if not dry_run:
-        recipients = s.notify_email_list()
+        # 收件人优先读 DB（前端配置），回退 .env
+        cfg = await get_dynamic_settings(["notify_emails"])
+        notify_raw = cfg.get("notify_emails") or ""
+        recipients = [e.strip() for e in notify_raw.split(",") if e.strip()]
         if recipients and success > 0:
-            html = render_daily_report(reports)
-            sent = await send_email(recipients, html)
+            html = await render_daily_report(reports)
+            sent, send_error = await send_email(recipients, html)
+            if not sent and send_error:
+                logger.warning("邮件发送失败: %s", send_error)
         elif not recipients:
-            logger.warning("未配置收件人（SCX_NOTIFY_EMAILS），跳过邮件发送")
+            logger.warning("未配置收件人，跳过邮件发送")
 
     logger.info(
         "每日分析完成: 共 %d 只，成功 %d，失败 %d，耗时 %.1fs，邮件=%s",

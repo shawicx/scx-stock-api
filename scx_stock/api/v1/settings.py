@@ -125,3 +125,36 @@ async def test_llm_connection(
         return ok(
             {"success": False, "message": f"连接失败: {e}", "reply": ""}
         )
+
+
+@router.post("/test-smtp", response_model=ApiResponse, summary="测试 SMTP 发信")
+async def test_smtp_connection(
+    _=Depends(ai_rate_limit()),
+) -> dict[str, object]:
+    """测试当前 SMTP 配置是否可用（向配置的收件人发一封测试邮件）。
+
+    :returns: 统一响应，data 含 success / message。
+    """
+    from scx_stock.notify.email_sender import build_message, send_email
+
+    # 读取收件人配置
+    cfg = await get_dynamic_settings(["notify_emails"])
+    notify_raw = cfg.get("notify_emails") or ""
+    recipients = [e.strip() for e in notify_raw.split(",") if e.strip()]
+    if not recipients:
+        return ok({"success": False, "message": "未配置收件人邮箱（notify_emails）"})
+
+    try:
+        html = (
+            "<h2>SMTP 测试邮件</h2>"
+            "<p>这是一封来自 scx-stock-api 的 SMTP 配置测试邮件。</p>"
+            "<p>如果你收到了这封邮件，说明 SMTP 配置正确。</p>"
+        )
+        sent, error = await send_email(recipients, html)
+        if sent:
+            return ok({"success": True, "message": f"测试邮件已发送至 {', '.join(recipients)}"})
+        else:
+            return ok({"success": False, "message": f"发送失败：{error}"})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("SMTP 测试发信失败: %s", e)
+        return ok({"success": False, "message": f"发送失败: {e}"})
