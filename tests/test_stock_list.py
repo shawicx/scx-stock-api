@@ -342,20 +342,20 @@ def test_stock_list_route_mounted(client):
     assert "/api/v1/stock/{code}" in paths  # 两者共存
 
 
-def test_stock_list_invalid_market_returns_422(client):
+def test_stock_list_invalid_market_returns_422(client, auth_headers):
     """非法 market 枚举返回 422。"""
-    resp = client.get("/api/v1/stock/list", params={"market": "美股"})
+    resp = client.get("/api/v1/stock/list", params={"market": "美股"}, headers=auth_headers)
     assert resp.status_code == 422
     assert resp.json()["code"] == 42201
 
 
-def test_stock_list_invalid_type_returns_422(client):
+def test_stock_list_invalid_type_returns_422(client, auth_headers):
     """非法 type 枚举返回 422。"""
-    resp = client.get("/api/v1/stock/list", params={"type": "bond"})
+    resp = client.get("/api/v1/stock/list", params={"type": "bond"}, headers=auth_headers)
     assert resp.status_code == 422
 
 
-def test_stock_list_page_ge_1(client):
+def test_stock_list_page_ge_1(client, auth_headers):
     """page < 1 返回 422。"""
-    resp = client.get("/api/v1/stock/list", params={"page": 0})
+    resp = client.get("/api/v1/stock/list", params={"page": 0}, headers=auth_headers)
     assert resp.status_code == 422

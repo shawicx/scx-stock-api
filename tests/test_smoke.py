@@ -1,9 +1,11 @@
 """
 @description 冒烟测试：验证包可导入、应用可创建、路由已挂载。
+
+认证：conftest.py 全局设置 SCX_TEST_TOKEN，auth_headers fixture 注入请求头。
 """
 
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 
 @pytest.fixture(scope="module")
@@ -11,7 +13,6 @@ def client():
     from scx_stock.main import create_app
 
     app = create_app()
-    # 跳过 lifespan 中的 DB 初始化，直接测路由
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
 
@@ -53,27 +54,26 @@ def test_response_format_uniform(client):
     assert body["message"] == "ok"
 
 
-def test_param_validation_error_format(client):
+def test_param_validation_error_format(client, auth_headers):
     """参数校验失败返回统一格式（含 code 42201）。"""
-    # search 缺少必填 q 参数
-    resp = client.get("/api/v1/search")
+    resp = client.get("/api/v1/search", headers=auth_headers)
     assert resp.status_code == 422
     body = resp.json()
     assert body["code"] == 42201
     assert "message" in body
 
 
-def test_invalid_code_rejected(client):
+def test_invalid_code_rejected(client, auth_headers):
     """非法代码返回 400。"""
-    resp = client.get("/api/v1/stock/abc123")
+    resp = client.get("/api/v1/stock/abc123", headers=auth_headers)
     assert resp.status_code == 400
 
 
-def test_unknown_stock_returns_graceful_error(client):
+def test_unknown_stock_returns_graceful_error(client, auth_headers):
     """格式合法但数据源取不到的代码，应优雅降级（不返回 500）。
 
     注：此用例依赖网络与数据源，结果不确定；仅断言不崩溃。
     """
-    resp = client.get("/api/v1/stock/899999")
+    resp = client.get("/api/v1/stock/899999", headers=auth_headers)
     assert resp.status_code != 500
     assert resp.status_code in (200, 404, 502)

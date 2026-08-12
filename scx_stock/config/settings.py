@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     # 限流
     ai_rate_limit_per_minute: int = 20
 
+    # 认证：固定测试 token（通过 SCX_TEST_TOKEN 配置，用于测试和开发环境）
+    # 生产环境留空，使用授权码认证
+    test_token: str = ""
+
     # 关注列表（逗号分隔的代码，股票/ETF 均可），供每日分析任务使用
     watchlist: str = ""
 

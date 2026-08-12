@@ -28,7 +28,10 @@ logger = logging.getLogger(__name__)
 
 
 async def upsert_stocks(rows: Iterable[dict[str, Any]]) -> int:
-    """批量 upsert 股票/ETF 列表（PostgreSQL ON CONFLICT）。
+    """批量 upsert 股票/ETF 列表（PostgreSQL ON CONFLICT），分批写入。
+
+    PostgreSQL 单次查询参数上限 65535，股票/ETF 每行 5 参数，
+    超过 ~13000 行时分批写入。
 
     :param rows: 字典迭代，需含 code / name / market / type / pinyin。
     :returns: 写入条数。
@@ -37,19 +40,24 @@ async def upsert_stocks(rows: Iterable[dict[str, Any]]) -> int:
     if not rows:
         return 0
 
+    BATCH_SIZE = 5000
     factory = get_session_factory()
+    total = 0
     async with factory() as session:
-        stmt = pg_insert(StockModel).values(rows)
-        # 冲突按 (code, type) 更新名称、市场、拼音
-        update_cols = {
-            "name": stmt.excluded.name,
-            "market": stmt.excluded.market,
-            "pinyin": stmt.excluded.pinyin,
-        }
-        stmt = stmt.on_conflict_do_update(
-            constraint="uq_stock_code_type", set_=update_cols
-        )
-        await session.execute(stmt)
+        for i in range(0, len(rows), BATCH_SIZE):
+            batch = rows[i : i + BATCH_SIZE]
+            stmt = pg_insert(StockModel).values(batch)
+            # 冲突按 (code, type) 更新名称、市场、拼音
+            update_cols = {
+                "name": stmt.excluded.name,
+                "market": stmt.excluded.market,
+                "pinyin": stmt.excluded.pinyin,
+            }
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_stock_code_type", set_=update_cols
+            )
+            await session.execute(stmt)
+            total += len(batch)
         await session.commit()
 
     logger.info("upserted %d stock rows", len(rows))
@@ -91,7 +99,10 @@ async def clear_all_stocks() -> int:
 
 
 async def upsert_stock_industries(rows: Iterable[dict[str, Any]]) -> int:
-    """批量 upsert 股票行业映射（code → industry）。
+    """批量 upsert 股票行业映射（code → industry），分批写入避免参数超限。
+
+    PostgreSQL 单次查询参数上限 65535，行业映射每行 2 参数，
+    超过 ~32000 行时分批写入。
 
     :param rows: 字典迭代，需含 code / industry。
     :returns: 写入条数。
@@ -100,17 +111,22 @@ async def upsert_stock_industries(rows: Iterable[dict[str, Any]]) -> int:
     if not rows:
         return 0
 
+    BATCH_SIZE = 2000
     factory = get_session_factory()
+    total = 0
     async with factory() as session:
-        stmt = pg_insert(StockIndustryModel).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["code"], set_={"industry": stmt.excluded.industry}
-        )
-        await session.execute(stmt)
+        for i in range(0, len(rows), BATCH_SIZE):
+            batch = rows[i : i + BATCH_SIZE]
+            stmt = pg_insert(StockIndustryModel).values(batch)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["code"], set_={"industry": stmt.excluded.industry}
+            )
+            await session.execute(stmt)
+            total += len(batch)
         await session.commit()
 
-    logger.info("upserted %d stock industry rows", len(rows))
-    return len(rows)
+    logger.info("upserted %d stock industry rows", total)
+    return total
 
 
 async def load_all_industries() -> dict[str, str]:

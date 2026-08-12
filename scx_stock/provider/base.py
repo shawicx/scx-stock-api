@@ -35,6 +35,12 @@ _DIRECT_DOMAINS = (
     "qt.gtimg.cn",
     "web.ifzq.gtimg.cn",
     "money.finance.sina.com.cn",
+    # 同花顺（fund.10jqka.com.cn / stockpage.10jqka.com.cn）
+    "10jqka.com.cn",
+    # 上金所（黄金现货）
+    "sge.com.cn",
+    # 新浪基金
+    "finance.sina.com.cn",
 )
 
 # 东方财富域名（反爬高风险，需缩短超时加速 fallback）
