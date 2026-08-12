@@ -141,3 +141,20 @@ class AnalysisReportModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class AuthCodeModel(Base):
+    """访问授权码表，记录生成的 16 位授权码及其有效期。
+
+    用户点「获取授权码」后生成随机码，发邮件到固定邮箱。
+    用户在输入框填写码后校验，通过则后续请求携带此码。
+    """
+
+    __tablename__ = "auth_code"
+
+    code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

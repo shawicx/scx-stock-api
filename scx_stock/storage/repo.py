@@ -16,6 +16,7 @@ from scx_stock.storage.db import get_session_factory
 from scx_stock.storage.models import (
     AnalysisReportModel,
     AppSettingModel,
+    AuthCodeModel,
     KlineModel,
     MarketCalendarModel,
     StockIndustryModel,
@@ -547,3 +548,77 @@ async def is_trading_day(d: date | None = None) -> bool:
 
     # DB 无记录时回退为星期判断
     return d.weekday() < 5
+
+
+# ---------------------------------------------------------------------------
+# 授权码（auth_code）
+# ---------------------------------------------------------------------------
+
+
+async def create_auth_code(code: str, expires_at) -> None:
+    """创建授权码（已有则更新有效期和激活状态）。
+
+    :param code: 16 位随机授权码。
+    :param expires_at: 过期时间（datetime）。
+    """
+    factory = get_session_factory()
+    async with factory() as session:
+        stmt = pg_insert(AuthCodeModel).values(
+            code=code, is_active=True, expires_at=expires_at
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["code"],
+            set_={"is_active": True, "expires_at": expires_at},
+        )
+        await session.execute(stmt)
+        await session.commit()
+
+
+async def validate_auth_code(code: str) -> bool:
+    """校验授权码是否有效（存在、激活、未过期）。
+
+    DB 不可用时返回 False（安全优先，拒绝访问）。
+
+    :param code: 授权码。
+    :returns: 有效返回 True。
+    """
+    from datetime import datetime, timezone
+
+    factory = get_session_factory()
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                select(AuthCodeModel).where(AuthCodeModel.code == code)
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                return False
+            if not row.is_active:
+                return False
+            # 时区安全比较（DB 可能返回 naive datetime）
+            expires = row.expires_at
+            now = datetime.now(timezone.utc)
+            if expires.tzinfo is None:
+                from datetime import timezone as tz
+
+                expires = expires.replace(tzinfo=tz.utc)
+            return expires > now
+    except Exception as e:  # noqa: BLE001
+        logger.warning("validate_auth_code failed: %s", e)
+        return False
+
+
+async def deactivate_auth_code(code: str) -> None:
+    """停用授权码（退出登录时调用）。
+
+    :param code: 授权码。
+    """
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            select(AuthCodeModel).where(AuthCodeModel.code == code)
+        )
+        row = result.scalar_one_or_none()
+        if row:
+            row.is_active = False
+            await session.commit()

@@ -5,7 +5,7 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from scx_stock.api.errors import register_exception_handlers
@@ -143,7 +143,9 @@ def _register_admin(app: FastAPI) -> None:
         handle.update_progress(f"索引重建完成（{r4.get('index_size', 0)}）")
         return {**r1, **r2, **r3, **r4}
 
-    @app.post("/admin/sync", tags=["运维"], summary="手动触发全量同步（异步）")
+    from scx_stock.middleware.auth import require_access_token
+
+    @app.post("/admin/sync", tags=["运维"], summary="手动触发全量同步（异步）", dependencies=[Depends(require_access_token)])
     async def _manual_sync() -> dict[str, object]:
         """提交全量同步后台任务，立即返回 task_id。
 
@@ -156,7 +158,7 @@ def _register_admin(app: FastAPI) -> None:
         task_id = tm.submit("全量同步", _run_sync_all)
         return ok({"task_id": task_id})
 
-    @app.post("/admin/reindex", tags=["运维"], summary="仅重建搜索索引")
+    @app.post("/admin/reindex", tags=["运维"], summary="仅重建搜索索引", dependencies=[Depends(require_access_token)])
     async def _manual_reindex() -> dict[str, object]:
         """从 DB 重建内存搜索索引（不拉取数据源，秒级完成）。
 
@@ -169,7 +171,7 @@ def _register_admin(app: FastAPI) -> None:
             logger.exception("manual reindex failed")
             return {"code": 1, "message": f"reindex failed: {e}", "data": None}
 
-    @app.get("/admin/task/{task_id}", tags=["运维"], summary="查询任务状态")
+    @app.get("/admin/task/{task_id}", tags=["运维"], summary="查询任务状态", dependencies=[Depends(require_access_token)])
     async def _get_task_status(task_id: str) -> dict[str, object]:
         """查询后台任务的当前状态与进度。
 
@@ -199,6 +201,9 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
     _register_health(app)
     _register_admin(app)
+    # public_router（auth 端点，不需要认证）必须先挂载
+    from scx_stock.api.router import public_router
+    app.include_router(public_router)
     app.include_router(api_router)
     return app
 
