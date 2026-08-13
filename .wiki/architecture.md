@@ -81,31 +81,38 @@ scx_stock/
 │   │   ├── stock.py            # GET /stock/list、GET /stock/{code}
 │   │   ├── search.py           # GET /search、GET /search/index-size
 │   │   ├── sector.py           # GET /sector/list、GET /sector/{name}
-│   │   └── market.py           # GET /market/index、GET /market/index/all
+│   │   ├── market.py           # GET /market/index、GET /market/index/all
+│   │   ├── gold.py             # GET /market/gold（黄金行情）
+│   │   ├── analysis.py         # POST /analysis/run、GET /analysis/latest|history|report
+│   │   ├── watchlist.py        # GET/POST/PUT/DELETE /watchlist（关注列表 CRUD）
+│   │   ├── settings.py         # GET/PUT /settings、POST /settings/test-llm|test-smtp
+│   │   └── auth.py             # POST /auth/request-code|verify|logout（认证）
 │   ├── deps.py                 # 依赖注入（Service / Cache）
 │   ├── errors.py               # 全局异常 → 统一 JSON
-│   └── router.py               # v1 路由聚合（前缀 /api/v1）
+│   └── router.py               # v1 路由聚合（public_router 无认证 + api_router 带认证）
 │
 ├── service/                    # 业务编排层
 │   ├── stock_service.py        # 行情列表（过滤+排序+分页）、个股详情
 │   ├── search_service.py       # 搜索
 │   ├── sector_service.py       # 板块排行+详情
-│   └── index_service.py        # 大盘指数
+│   ├── index_service.py        # 大盘指数
+│   └── gold_service.py         # 黄金行情
 │
 ├── repository/                 # 缓存 + Provider 编排
 │   ├── router.py               # StockRepository（行情/详情）
 │   ├── sector_repo.py          # SectorRepository（板块）
-│   └── index_repo.py           # IndexRepository（指数）
+│   ├── index_repo.py           # IndexRepository（指数）
+│   └── gold_repo.py            # GoldRepository（黄金）
 │
 ├── provider/                   # 数据源抽象
-│   ├── contracts.py            # Protocol 接口（StockProvider 等）
-│   ├── base.py                 # SyncProviderBase + UA 注入 + 代理绕过
-│   └── akshare_provider.py     # AkShare 多源 fallback 实现
+│   ├── contracts.py            # Protocol 接口（StockProvider / KlineProvider 等）
+│   ├── base.py                 # SyncProviderBase + UA 注入 + 代理绕过 + 东方财富超时优化
+│   └── akshare_provider.py     # AkShare 多源 fallback 实现（含 validate 校验）
 │
 ├── storage/                    # 持久化
 │   ├── db.py                   # 异步引擎/会话/自动建库
-│   ├── models.py               # ORM：stock / kline / market_calendar / stock_industry
-│   └── repo.py                 # 批量 upsert / 全量加载
+│   ├── models.py               # ORM：stock / kline / market_calendar / stock_industry / analysis_report / watchlist / app_setting / auth_code
+│   └── repo.py                 # 批量 upsert / 全量加载 / K线读写 / 交易日历 / 授权码
 │
 ├── cache/
 │   ├── backend.py              # CacheBackend 抽象 + RedisCache + MemoryCache
@@ -119,26 +126,46 @@ scx_stock/
 │   ├── common.py               # ApiResponse / PageData / HealthStatus / ok() / fail()
 │   ├── stock.py                # StockListItem / StockInfo / Quote / StockDetailResponse
 │   ├── sector.py               # SectorQuote / SectorDetail
-│   └── index.py                # IndexQuote（在 __init__.py）
+│   ├── index.py                # IndexQuote（在 __init__.py）
+│   ├── gold.py                 # GoldQuote
+│   ├── kline.py                # Kline / KlineBar
+│   └── analysis.py             # SupportLevel / AnalysisReport
 │
 ├── exceptions/                 # 异常分层
 │   ├── provider.py             # ProviderError / ProviderUnavailableError / ...
 │   └── service.py              # ServiceError / NotFoundError / ValidationError / RateLimitExceededError
 │
 ├── middleware/
-│   └── rate_limit.py           # 限流（固定窗口，get_client_ip + check_rate_limit + ai_rate_limit）
+│   ├── rate_limit.py           # 限流（固定窗口，get_client_ip + check_rate_limit + ai_rate_limit）
+│   └── auth.py                 # 授权码校验依赖（X-Access-Token / 固定 token）
+│
+├── analysis/                   # 支撑位分析引擎
+│   ├── indicators.py           # 技术指标计算（MA/BOLL/Pivot/前低前高）
+│   ├── support.py              # 支撑/压力位筛选+聚类+打分
+│   ├── trend.py                # 趋势判断（均线排列）
+│   └── engine.py               # 编排：K线→指标→支撑位→趋势→结构化结果
+│
+├── llm/                        # AI 解读层
+│   ├── client.py               # OpenAI 兼容客户端（GLM/DeepSeek，动态配置）
+│   └── interpreter.py          # 结构化结果→LLM解读→摘要（失败降级模板）
+│
+├── notify/                     # 通知层
+│   ├── email_sender.py         # aiosmtplib 异步发送（动态 SMTP 配置）
+│   └── templates/
+│       └── daily_report.html   # jinja2 邮件模板
 │
 ├── scheduler/
-│   ├── runner.py               # APScheduler 封装 + 调度计划
-│   └── sync_jobs.py            # 4 个同步任务
+│   ├── runner.py               # APScheduler 封装 + 调度计划（7 个任务）
+│   ├── sync_jobs.py            # 同步任务（股票/ETF/行业/索引/K线/交易日历）
+│   ├── analysis_job.py         # 每日支撑位分析任务（DB优先读K线+落库+发邮件）
+│   └── task_manager.py         # 后台异步任务管理（全量同步进度轮询）
 │
 ├── config/
 │   ├── settings.py             # 全局配置（环境变量前缀 SCX_）
+│   ├── dynamic.py              # 动态配置读取（DB app_setting 优先，.env 回退）
 │   └── datasource.py           # 数据源能力声明表
 │
-├── llm/                        # LLM/AI 分析（预留，未实现）
-│
-└── main.py                     # FastAPI 入口（lifespan + CORS + 异常 + 健康 + 运维 + 路由）
+└── main.py                     # FastAPI 入口（lifespan + CORS + 异常 + 健康 + 运维 + 认证 + 路由）
 ```
 
 ---
@@ -204,8 +231,12 @@ source, df = await self._call_with_fallback(sources, domain="list_stock_quotes")
 |------|------|---------|---------|
 | `stock` | 股票/ETF 基础信息 | code(PK), name, market, pinyin, type(PK), updated_at；唯一约束 (code, type) | ✅ Scheduler 每日同步 |
 | `stock_industry` | 行业映射 | code(PK), industry, updated_at | ✅ Scheduler 每日同步 |
-| `kline` | 历史 K 线 | id(PK), code, trade_date, ohlcv；唯一约束 (code, trade_date) | ⏳ 表已定义，无数据写入 |
-| `market_calendar` | 交易日历 | trade_date(PK), is_open | ⏳ 表已定义，无数据写入 |
+| `kline` | 历史 K 线 | id(PK), code, trade_date, ohlcv；唯一约束 (code, trade_date) | ✅ sync_kline 每日 16:00 增量同步 |
+| `market_calendar` | 交易日历 | trade_date(PK), is_open | ✅ 每周一 06:00 同步（~8797 行） |
+| `analysis_report` | 分析报告历史 | id(PK), code, trade_date, close, change_pct, trend, ok, payload(JSONB)；唯一约束 (code, trade_date) | ✅ 每日分析后落库 |
+| `watchlist` | 关注列表 | code(PK), name, sort_order, created_at | ✅ 前端管理 |
+| `app_setting` | 应用配置（KV） | key(PK), value, updated_at | ✅ 前端 /settings 页管理 |
+| `auth_code` | 访问授权码 | code(PK), is_active, expires_at, created_at | ✅ 认证机制 |
 
 ### 6.2 自动建库
 
@@ -268,12 +299,15 @@ async def analyze(_=Depends(ai_rate_limit())):
 
 ### 9.1 调度计划（`scheduler/runner.py`，时区 Asia/Shanghai）
 
-| 任务 | Cron（周一至五） | 说明 |
+| 任务 | Cron | 说明 |
 |------|:---:|------|
 | `sync_stock_list` | `0 9 * * 1-5` | 实际调 `sync_all`（串行：股票+ETF+行业+索引） |
 | `sync_etf_list` | `10 9 * * 1-5` | ETF 列表 |
 | `sync_stock_industries` | `15 9 * * 1-5` | 行业映射（板块成分股反查） |
 | `rebuild_search_index` | `20 9 * * 1-5` | 重建内存搜索索引 |
+| `sync_market_calendar` | `0 6 * * 1` | 同步交易日历（每周一） |
+| `sync_kline` | `0 16 * * 1-5` | 增量同步关注列表 K 线（收盘后） |
+| `daily_analysis` | `0 21 * * 1-5` | 支撑位分析+AI解读+发邮件（非交易日跳过） |
 
 ### 9.2 容错
 
@@ -306,7 +340,11 @@ async def analyze(_=Depends(ai_rate_limit())):
 
 1. **AkShare 同步库必须 `to_thread` 包装**：`SyncProviderBase._run` 推入线程池，避免阻塞事件循环
 2. **实时行情必须缓存兜底**：数据源有限速，前端永远打缓存
-3. **多源 fallback**：东方财富不可用时自动切换新浪/腾讯
+3. **多源 fallback + validate 校验**：东方财富不可用时自动切换新浪/腾讯/同花顺；`_call_with_fallback` 支持 `validate` 回调防御空 DataFrame / 列名不匹配静默失败
+4. **东方财富超时优化**：`provider/base.py` 对东方财富域名强制 timeout=5s（AkShare 默认 15s × 3 次重试太慢）
+5. **K 线 DB 优先读**：分析时优先从 DB 读 K 线，DB 不足时 fallback Provider 拉取并回填 DB
+6. **动态配置**：LLM/SMTP 配置优先读 DB `app_setting` 表（前端修改即时生效），`.env` 作为回退默认值
+7. **认证**：`middleware/auth.py` 校验 X-Access-Token 头，支持固定测试 token + 动态授权码两种方式
 
 ---
 
@@ -316,6 +354,6 @@ async def analyze(_=Depends(ai_rate_limit())):
 |------|------|------|
 | ETF 详情 `GET /etf/{code}` | ❌ | 当前 `/stock/{code}` 正则排除 ETF 代码 |
 | 主力资金 `GET /fund_flow/{code}` | ❌ | 腾讯源已有 `zljlr` 字段可复用 |
-| K 线同步 | ❌ | 表已定义，无 Scheduler 写入 |
-| AI 分析 `POST /ai/analyze` | ❌ | `llm/` 空包，限流已就绪 |
-| 数据源主备 failover | ❌ | `repository/fallback.py` 设计稿，未实现 |
+| K 线图表可视化 | ❌ | 前端 K 线蜡烛图 + 支撑位可视化标注 |
+| 跌破支撑位即时提醒 | ❌ | 事件驱动通知（当前仅每日 21:00 定时报告） |
+| 多周期分析 | ❌ | 周线/月线/60分钟线 |

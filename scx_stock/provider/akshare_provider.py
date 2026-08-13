@@ -365,7 +365,7 @@ class AkshareProvider(SyncProviderBase):
         return out
 
     async def list_etfs(self) -> list[StockInfo]:
-        """获取全量 ETF 列表，用于搜索索引构建（东方财富 → 同花顺 fallback）。
+        """获取全量 ETF 列表，用于搜索索引构建（东方财富 → 同花顺 → 新浪 fallback）。
 
         :returns: StockInfo 列表（含拼音与 type=etf）。
         """
@@ -373,6 +373,7 @@ class AkshareProvider(SyncProviderBase):
             [
                 ("em", ak.fund_etf_spot_em, {}),
                 ("ths", ak.fund_etf_spot_ths, {}),
+                ("sina", ak.fund_etf_category_sina, {"symbol": "ETF基金"}),
             ],
             domain="list_etfs",
             validate=_validate_df_with_columns("代码", "基金代码"),
@@ -381,7 +382,7 @@ class AkshareProvider(SyncProviderBase):
         return self._df_to_stock_info(df, default_type="etf")
 
     async def list_etf_quotes(self) -> list[StockListItem]:
-        """获取全量 ETF 实时行情列表（东方财富 → 同花顺 fallback）。
+        """获取全量 ETF 实时行情列表（东方财富 → 同花顺 → 新浪 fallback）。
 
         :returns: StockListItem 列表（market 统一为 "ETF"）。
         :raises ProviderUnavailableError: 数据源不可用。
@@ -390,6 +391,7 @@ class AkshareProvider(SyncProviderBase):
             [
                 ("em", ak.fund_etf_spot_em, {}),
                 ("ths", ak.fund_etf_spot_ths, {}),
+                ("sina", ak.fund_etf_category_sina, {"symbol": "ETF基金"}),
             ],
             domain="list_etf_quotes",
             validate=_validate_df_with_columns("代码", "基金代码"),
@@ -863,14 +865,23 @@ def _normalize_etf_columns(df: Any, source: str) -> Any:
     东方财富 fund_etf_spot_em 使用中文列名（代码/名称/最新价/...），无需映射。
     同花顺 fund_etf_spot_ths 使用 基金代码/基金名称/增长率 等不同列名，需映射；
     且 THS 是净值口径，无实时价/开盘/最高/最低/成交量，这些字段留空即可。
+    新浪 fund_etf_category_sina 代码带 sh/sz 前缀（如 sz159998），需去前缀。
 
     :param df: AkShare 返回的 DataFrame。
-    :param source: 数据源标识（em/ths）。
+    :param source: 数据源标识（em/ths/sina）。
     :returns: 列名归一化后的 DataFrame。
     """
-    if source != "ths" or df is None or df.empty:
+    if df is None or df.empty:
         return df
-    return df.rename(columns=_ETF_COLUMN_MAP_THS)
+
+    if source == "ths":
+        df = df.rename(columns=_ETF_COLUMN_MAP_THS)
+    elif source == "sina":
+        # 新浪源代码带 sh/sz 前缀，去掉以保持一致
+        df = df.copy()
+        df["代码"] = df["代码"].str.replace(r"^(sh|sz)", "", regex=True)
+
+    return df
 
 
 def _classify_market(code: str) -> str:
