@@ -2,6 +2,8 @@
 
 > 部署到阿里云 ECS（与 scx-backend 共用同一台 ECS）。
 
+源码：`Dockerfile`、`.github/workflows/`、`.dockerignore`。
+
 ---
 
 ## 1. 部署架构
@@ -53,7 +55,7 @@ pull_request:
 
 | Secret | 用途 |
 |--------|------|
-| `ACR_REGISTRY` | 阿里云容器镜像服务地址（如 `registry.cn-shenzhen.aliyuncs.com`） |
+| `ACR_REGISTRY` | 阿里云容器镜像服务地址 |
 | `ACR_NAMESPACE` | ACR 命名空间 |
 | `ACR_USERNAME` | ACR 用户名 |
 | `ACR_PASSWORD` | ACR 密码 |
@@ -69,7 +71,6 @@ pull_request:
 ### 4.1 创建生产 .env
 
 ```bash
-# SSH 登录 ECS 后
 sudo mkdir -p /opt/scx-stock-api
 sudo tee /opt/scx-stock-api/.env > /dev/null << 'EOF'
 SCX_APP_ENV=prod
@@ -86,7 +87,7 @@ SCX_CORS_ORIGINS=http://<ECS公网IP>:6900
 EOF
 ```
 
-> **重要**：`.env` 文件不支持行内注释（`# 独立PG` 会破坏 pydantic 解析）。注释单独成行或删除。
+> **重要**：`.env` 不支持行内注释。注释单独成行或删除。
 
 ### 4.2 在 GitHub 添加 Secret
 
@@ -148,9 +149,11 @@ curl http://localhost:3800/health
 
 **重要**：阿里云 ECS 的 IP 段被东方财富反爬封锁（`push2.eastmoney.com` 返回 `RemoteDisconnected`）。
 
-后端已内置多源 fallback：
-- 东方财富（被封）→ 自动切换新浪 `vip.stock.finance.sina.com.cn`（可用）
-- 新浪偶发限流 → 自动切换腾讯 `proxy.finance.qq.com`（可用）
+后端已内置多源 fallback（详见 [04-data-providers/fallback](../04-data-providers/fallback.md)）：
+
+- **ETF 列表/报价**：新浪（第一源，云可用）→ 东方财富 → 同花顺
+- **股票行情/列表**：东方财富（被封）→ 自动切换新浪 → 腾讯
+- **板块/指数**：东方财富 → 新浪
 
 无需额外配置，fallback 自动触发。
 
@@ -166,3 +169,12 @@ curl http://localhost:3800/health
 | scx-gold (nginx) | 128m | 静态文件托管 |
 
 ECS 总内存约 4G 时可与其他项目（scx-backend）共存。
+
+---
+
+## Related
+
+- [环境变量全量](../08-configuration/environment-variables.md)
+- [快速上手](../02-getting-started/quick-start.md)
+- [多源 Fallback](../04-data-providers/fallback.md)
+- [健康检查接口](../05-api/health-admin.md)
