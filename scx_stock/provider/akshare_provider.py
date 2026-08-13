@@ -365,15 +365,19 @@ class AkshareProvider(SyncProviderBase):
         return out
 
     async def list_etfs(self) -> list[StockInfo]:
-        """获取全量 ETF 列表，用于搜索索引构建（东方财富 → 同花顺 → 新浪 fallback）。
+        """获取全量 ETF 列表，用于搜索索引构建（新浪 → 东方财富 → 同花顺 fallback）。
+
+        数据源优先级说明：新浪单次请求 ~1 秒返回全量（1600+），
+        东方财富需分页拉取 15 页耗时 ~120 秒，同花顺经常超时。
+        因此把最快的 sina 放首位，em 作为数据更全的兜底。
 
         :returns: StockInfo 列表（含拼音与 type=etf）。
         """
         source, df = await self._call_with_fallback(
             [
+                ("sina", ak.fund_etf_category_sina, {"symbol": "ETF基金"}),
                 ("em", ak.fund_etf_spot_em, {}),
                 ("ths", ak.fund_etf_spot_ths, {}),
-                ("sina", ak.fund_etf_category_sina, {"symbol": "ETF基金"}),
             ],
             domain="list_etfs",
             validate=_validate_df_with_columns("代码", "基金代码"),
@@ -382,16 +386,18 @@ class AkshareProvider(SyncProviderBase):
         return self._df_to_stock_info(df, default_type="etf")
 
     async def list_etf_quotes(self) -> list[StockListItem]:
-        """获取全量 ETF 实时行情列表（东方财富 → 同花顺 → 新浪 fallback）。
+        """获取全量 ETF 实时行情列表（新浪 → 东方财富 → 同花顺 fallback）。
+
+        数据源优先级同 list_etfs：新浪最快（~1s），东方财富分页慢（~120s）。
 
         :returns: StockListItem 列表（market 统一为 "ETF"）。
         :raises ProviderUnavailableError: 数据源不可用。
         """
         source, df = await self._call_with_fallback(
             [
+                ("sina", ak.fund_etf_category_sina, {"symbol": "ETF基金"}),
                 ("em", ak.fund_etf_spot_em, {}),
                 ("ths", ak.fund_etf_spot_ths, {}),
-                ("sina", ak.fund_etf_category_sina, {"symbol": "ETF基金"}),
             ],
             domain="list_etf_quotes",
             validate=_validate_df_with_columns("代码", "基金代码"),

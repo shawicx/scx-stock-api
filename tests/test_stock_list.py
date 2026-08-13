@@ -141,7 +141,8 @@ async def test_provider_list_etf_quotes_maps_columns():
         ]
     )
     provider = AkshareProvider()
-    with patch("akshare.fund_etf_spot_em", return_value=df):
+    # sina 是第一优先源；mock sina 返回测试 df，em/ths 不应被调用
+    with patch("akshare.fund_etf_category_sina", return_value=df):
         result = await provider.list_etf_quotes()
 
     assert len(result) == 1
