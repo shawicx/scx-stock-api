@@ -43,6 +43,15 @@ async def test_sync_stock_list_handles_provider_error():
     assert result == {"stock_count": 0}
 
 
+def test_to_rows_truncates_pinyin():
+    """_to_rows 截断超长拼音，防打爆 VARCHAR(128) 整批写入。"""
+    long_pinyin = "a" * 200
+    item = StockInfo(code="510300", name="某超长名称ETF", market="ETF", pinyin=long_pinyin, type="etf")
+    rows = sync_jobs._to_rows([item], "etf")
+
+    assert len(rows[0]["pinyin"]) == 128
+
+
 @pytest.mark.asyncio
 async def test_sync_stock_list_handles_db_write_error():
     """DB 写入失败时返回 0 且不抛异常（不阻断后续同步步骤）。"""

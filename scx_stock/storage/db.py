@@ -126,10 +126,49 @@ async def _create_database_if_missing() -> bool:
         await conn.close()
 
 
+def _align_varchar_lengths_sync(conn) -> list[str]:
+    """对比 ORM 模型与库中 varchar 列长度，扩容偏短的列。
+
+    ``create_all`` 只建新表不改旧表，模型扩长（如 stock.pinyin 64→128）后
+    旧库不会自动跟进，超长值写入会报 StringDataRightTruncationError。
+    此函数按 information_schema 实测长度决定是否 ALTER（表/列名来自
+    受信的 ORM 元数据，无注入风险）。
+
+    :param conn: SQLAlchemy 同步连接（由 run_sync 提供）。
+    :returns: 变更描述列表（如 "stock.pinyin: 64 -> 128"）。
+    """
+    from sqlalchemy import text
+
+    changed: list[str] = []
+    for table in Base.metadata.tables.values():
+        for column in table.columns:
+            model_len = getattr(column.type, "length", None)
+            if model_len is None:
+                continue
+            row = conn.execute(
+                text(
+                    "SELECT character_maximum_length FROM information_schema.columns "
+                    "WHERE table_name = :t AND column_name = :c"
+                ),
+                {"t": table.name, "c": column.name},
+            ).fetchone()
+            if row is None or row[0] is None or row[0] >= model_len:
+                continue
+            conn.execute(
+                text(
+                    f'ALTER TABLE {table.name} ALTER COLUMN "{column.name}" '
+                    f"TYPE VARCHAR({model_len})"
+                )
+            )
+            changed.append(f"{table.name}.{column.name}: {row[0]} -> {model_len}")
+    return changed
+
+
 async def init_db() -> None:
-    """初始化数据库：建表（开发期使用，生产用 Alembic 迁移）。
+    """初始化数据库：建表并自动扩容偏短的 varchar 列（开发期使用，生产用 Alembic 迁移）。
 
     若 ``db_auto_create`` 开启且目标库不存在，自动连 postgres 维护库创建。
+    建表后对比模型与库中 varchar 长度，ALTER 扩容偏短的列（旧库 schema 漂移自愈）。
     """
     from scx_stock.storage import models  # noqa: F401 确保模型已注册
 
@@ -149,6 +188,12 @@ async def init_db() -> None:
         engine = get_engine()
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+
+    # varchar 列长度对齐（create_all 不改旧表，扩容漂移列）
+    async with engine.begin() as conn:
+        changed = await conn.run_sync(_align_varchar_lengths_sync)
+    if changed:
+        logger.info("aligned varchar columns: %s", ", ".join(changed))
 
 
 async def close_db() -> None:

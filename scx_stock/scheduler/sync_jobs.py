@@ -37,6 +37,8 @@ def _to_rows(items, default_type: str) -> list[dict]:
     :param default_type: stock / etf。
     :returns: dict 列表。
     """
+    # 与 StockModel.pinyin 的 VARCHAR(128) 对齐，防超长基金名打爆整批写入
+    pinyin_max = 128
     rows = []
     for it in items:
         pinyin = it.pinyin or make_pinyin_for_search(it.name)
@@ -45,7 +47,7 @@ def _to_rows(items, default_type: str) -> list[dict]:
                 "code": it.code,
                 "name": it.name,
                 "market": it.market or _classify_market(it.code),
-                "pinyin": pinyin,
+                "pinyin": pinyin[:pinyin_max],
                 "type": it.type or default_type,
             }
         )
