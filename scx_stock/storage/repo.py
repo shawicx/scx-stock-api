@@ -101,15 +101,25 @@ async def clear_all_stocks() -> int:
 async def upsert_stock_industries(rows: Iterable[dict[str, Any]]) -> int:
     """批量 upsert 股票行业映射（code → industry），分批写入避免参数超限。
 
+    同一只股票可能出现在多个行业板块中，按 code 去重（保留最后出现的行业）
+    以避免 ``ON CONFLICT DO UPDATE`` 的 ``CardinalityViolationError``。
     PostgreSQL 单次查询参数上限 65535，行业映射每行 2 参数，
     超过 ~32000 行时分批写入。
 
     :param rows: 字典迭代，需含 code / industry。
-    :returns: 写入条数。
+    :returns: 去重后写入条数。
     """
     rows = list(rows)
     if not rows:
         return 0
+
+    # 按 code 去重：同一股票保留最后出现的行业
+    seen: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        code = row.get("code", "")
+        if code:
+            seen[code] = row
+    rows = list(seen.values())
 
     BATCH_SIZE = 2000
     factory = get_session_factory()

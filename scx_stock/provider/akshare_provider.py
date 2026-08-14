@@ -438,18 +438,18 @@ class AkshareProvider(SyncProviderBase):
         return out
 
     async def list_sectors(self) -> list[SectorQuote]:
-        """获取行业板块实时涨跌列表（东方财富 → 新浪 fallback）。
+        """获取行业板块实时涨跌列表（新浪 → 东方财富 fallback）。
 
         :returns: SectorQuote 列表。
         :raises ProviderUnavailableError: 数据源不可用。
         """
         source, df = await self._call_with_fallback(
             [
-                ("em", ak.stock_board_industry_name_em, {}),
                 ("sina", ak.stock_sector_spot, {"indicator": "新浪行业"}),
+                ("em", ak.stock_board_industry_name_em, {}),
             ],
             domain="list_sectors",
-            validate=_validate_df_with_columns("板块名称", "板块"),
+            validate=_validate_df_with_columns("板块", "板块名称"),
         )
 
         if df is None or df.empty:
@@ -491,23 +491,24 @@ class AkshareProvider(SyncProviderBase):
     async def get_sector_constituents(
         self, sector_name: str, sector_label: str = ""
     ) -> list[dict[str, str]]:
-        """获取板块成分股（东方财富 → 新浪 fallback）。
+        """获取板块成分股（新浪 → 东方财富 fallback）。
 
-        东方财富按板块名称查询（如 "小金属"），新浪按 label 查询（如 "new_xjsc"）。
-        先尝试东方财富，失败后用新浪 label（需调用方提供）。
+        新浪按 label 查询（如 "new_xjsc"），东方财富按板块名称查询（如 "小金属"）。
+        新浪优先，失败后用东方财富（需调用方提供 sector_name）。
 
-        :param sector_name: 板块名称（东方财富行业板块名）。
-        :param sector_label: 新浪板块 label（可选，用于 fallback）。
+        :param sector_name: 板块名称（东方财富行业板块名，用于 fallback）。
+        :param sector_label: 新浪板块 label（优先使用）。
         :returns: 成分股列表，每项含 code / name。
         """
         # 构造 fallback 链
-        sources: list[tuple[str, Callable[..., Any], dict[str, Any]]] = [
-            ("em", ak.stock_board_industry_cons_em, {"symbol": sector_name}),
-        ]
+        sources: list[tuple[str, Callable[..., Any], dict[str, Any]]] = []
         if sector_label:
             sources.append(
                 ("sina", ak.stock_sector_detail, {"sector": sector_label})
             )
+        sources.append(
+            ("em", ak.stock_board_industry_cons_em, {"symbol": sector_name}),
+        )
 
         try:
             source, df = await self._call_with_fallback(
