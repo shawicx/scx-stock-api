@@ -24,7 +24,7 @@ from scx_stock.service.sector_service import SectorService
 
 @pytest.mark.asyncio
 async def test_provider_list_sectors_maps_columns():
-    """list_sectors 正确映射东方财富列名。"""
+    """list_sectors 新浪源失败时 fallback 东方财富并正确映射列名。"""
     df = pd.DataFrame(
         [
             {
@@ -43,7 +43,10 @@ async def test_provider_list_sectors_maps_columns():
         ]
     )
     provider = AkshareProvider()
-    with patch("akshare.stock_board_industry_name_em", return_value=df):
+    with (
+        patch("akshare.stock_sector_spot", side_effect=RuntimeError("sina down")),
+        patch("akshare.stock_board_industry_name_em", return_value=df),
+    ):
         result = await provider.list_sectors()
 
     assert len(result) == 1
@@ -54,6 +57,37 @@ async def test_provider_list_sectors_maps_columns():
     assert s.change_pct == 2.09
     assert s.up_count == 80
     assert s.down_count == 10
+    assert s.leading_stock == "某股票"
+
+
+@pytest.mark.asyncio
+async def test_provider_list_sectors_sina_first_source():
+    """list_sectors 新浪第一源正确映射列名。"""
+    df = pd.DataFrame(
+        [
+            {
+                "label": "new_xjsc",
+                "板块": "小金属",
+                "平均价格": 1000.5,
+                "涨跌额": 20.5,
+                "涨跌幅": 2.09,
+                "公司家数": 80,
+                "股票名称": "某股票",
+            }
+        ]
+    )
+    provider = AkshareProvider()
+    with patch("akshare.stock_sector_spot", return_value=df):
+        result = await provider.list_sectors()
+
+    assert len(result) == 1
+    s = result[0]
+    assert s.code == "new_xjsc"
+    assert s.name == "小金属"
+    assert s.label == "new_xjsc"
+    assert s.price == 1000.5
+    assert s.change_pct == 2.09
+    assert s.up_count == 80
     assert s.leading_stock == "某股票"
 
 
