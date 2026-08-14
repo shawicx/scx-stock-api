@@ -365,17 +365,18 @@ class AkshareProvider(SyncProviderBase):
         return out
 
     async def list_etfs(self) -> list[StockInfo]:
-        """获取全量 ETF 列表，用于搜索索引构建（新浪 → 东方财富 → 同花顺 fallback）。
+        """获取全量 ETF 列表，用于搜索索引构建（新浪 → 新浪json_v2 → 东方财富 → 同花顺 fallback）。
 
-        数据源优先级说明：新浪单次请求 ~1 秒返回全量（1600+），
-        东方财富需分页拉取 15 页耗时 ~120 秒，同花顺经常超时。
-        因此把最快的 sina 放首位，em 作为数据更全的兜底。
+        数据源优先级说明：新浪单次请求 ~1 秒返回全量（1600+）；
+        新浪 json_v2 分页接口对数据中心 IP 友好（ECS 上 jsonp 版被反爬时可用它兜底）；
+        东方财富需分页拉取 15 页且在 ECS 上被反爬封锁，同花顺经常超时。
 
         :returns: StockInfo 列表（含拼音与 type=etf）。
         """
         source, df = await self._call_with_fallback(
             [
                 ("sina", ak.fund_etf_category_sina, {"symbol": "ETF基金"}),
+                ("sina_v2", _fetch_etf_list_sina_v2, {}),
                 ("em", ak.fund_etf_spot_em, {}),
                 ("ths", ak.fund_etf_spot_ths, {}),
             ],
@@ -386,9 +387,10 @@ class AkshareProvider(SyncProviderBase):
         return self._df_to_stock_info(df, default_type="etf")
 
     async def list_etf_quotes(self) -> list[StockListItem]:
-        """获取全量 ETF 实时行情列表（新浪 → 东方财富 → 同花顺 fallback）。
+        """获取全量 ETF 实时行情列表（新浪 → 新浪json_v2 → 东方财富 → 同花顺 fallback）。
 
-        数据源优先级同 list_etfs：新浪最快（~1s），东方财富分页慢（~120s）。
+        数据源优先级同 list_etfs：新浪最快（~1s），json_v2 版对数据中心
+        IP 友好，东方财富在 ECS 上被反爬封锁，同花顺经常超时。
 
         :returns: StockListItem 列表（market 统一为 "ETF"）。
         :raises ProviderUnavailableError: 数据源不可用。
@@ -396,6 +398,7 @@ class AkshareProvider(SyncProviderBase):
         source, df = await self._call_with_fallback(
             [
                 ("sina", ak.fund_etf_category_sina, {"symbol": "ETF基金"}),
+                ("sina_v2", _fetch_etf_list_sina_v2, {}),
                 ("em", ak.fund_etf_spot_em, {}),
                 ("ths", ak.fund_etf_spot_ths, {}),
             ],
@@ -864,6 +867,75 @@ _ETF_COLUMN_MAP_THS = {
     "增长率": "涨跌幅",
     "增长值": "涨跌额",
 }
+
+# 新浪 json_v2 ETF 接口原始字段 → 归一化中文列名
+_ETF_SINA_V2_COLUMN_MAP = {
+    "code": "代码",
+    "name": "名称",
+    "trade": "最新价",
+    "pricechange": "涨跌额",
+    "changepercent": "涨跌幅",
+    "volume": "成交量",
+    "amount": "成交额",
+    "turnoverratio": "换手率",
+    "high": "最高",
+    "low": "最低",
+    "open": "今开",
+    "settlement": "昨收",
+}
+
+
+def _fetch_etf_list_sina_v2() -> Any:
+    """新浪 json_v2 接口分页拉取全量 ETF 列表。
+
+    ``fund_etf_category_sina`` 使用的 jsonp 接口对数据中心 IP 有反爬限制
+    （只返回重定向脚本不含数据），导致 ECS 上 ETF 同步失败。本函数改用
+    ``json_v2.php/Market_Center.getHQNodeData``（与板块成分股同族接口，
+    在 ECS 上验证可用），按 ``node=etf_hq_fund`` 分页拉取全量 ETF，
+    代码字段天然无 sh/sz 前缀。
+
+    :returns: 归一化中文列名的 DataFrame（代码/名称/最新价/...）。
+    :raises RuntimeError: 接口不可用或返回异常。
+
+    :example df = _fetch_etf_list_sina_v2()  # 全量 ~1600 只 ETF
+    """
+    import json
+    from typing import cast
+
+    import pandas as pd
+    import requests
+
+    url = (
+        "http://vip.stock.finance.sina.com.cn/quotes_service/api/"
+        "json_v2.php/Market_Center.getHQNodeData"
+    )
+    page_size = 100
+    rows: list[dict] = []
+    # 全量约 1630 只（17 页），上限 30 页防御性截断
+    for page in range(1, 31):
+        resp = requests.get(
+            url,
+            params={
+                "page": page,
+                "num": page_size,
+                "sort": "symbol",
+                "asc": 1,
+                "node": "etf_hq_fund",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = cast(list, json.loads(resp.text))
+        if not data:
+            break
+        rows.extend(data)
+        if len(data) < page_size:
+            break
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        raise RuntimeError("sina_v2 etf list empty")
+    return df.rename(columns=_ETF_SINA_V2_COLUMN_MAP)
 
 
 def _normalize_etf_columns(df: Any, source: str) -> Any:

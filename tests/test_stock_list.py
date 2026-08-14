@@ -153,6 +153,76 @@ async def test_provider_list_etf_quotes_maps_columns():
     assert item.price == 4.0
 
 
+def test_fetch_etf_list_sina_v2_maps_columns():
+    """sina_v2 拉取函数分页请求并把原始英文列名映射为中文列名。"""
+    from scx_stock.provider.akshare_provider import _fetch_etf_list_sina_v2
+
+    class _FakeResp:
+        def __init__(self, text):
+            self.text = text
+
+        def raise_for_status(self):
+            return None
+
+    import json as _json
+
+    rows = [
+        {
+            "code": "510300",
+            "name": "沪深300ETF",
+            "trade": "4.0",
+            "pricechange": "0.02",
+            "changepercent": "0.5",
+            "volume": "9999",
+            "amount": "500000000",
+            "turnoverratio": "1.0",
+            "high": "4.02",
+            "low": "3.98",
+            "open": "3.99",
+            "settlement": "3.98",
+        },
+        {
+            "code": "159915",
+            "name": "创业板ETF",
+            "trade": "2.0",
+            "pricechange": "0.01",
+            "changepercent": "0.4",
+        },
+    ]
+    # 返回条数 < 每页 100，拉取一页即止
+    with patch(
+        "requests.get", return_value=_FakeResp(_json.dumps(rows))
+    ) as m:
+        df = _fetch_etf_list_sina_v2()
+
+    assert m.call_count == 1
+    assert len(df) == 2
+    assert df.iloc[0]["代码"] == "510300"
+    assert df.iloc[0]["名称"] == "沪深300ETF"
+    assert "最新价" in df.columns and "昨收" in df.columns
+
+
+@pytest.mark.asyncio
+async def test_provider_list_etfs_sina_v2_fallback():
+    """jsonp 新浪源失败时 fallback 到 sina_v2（ECS 反爬场景）。"""
+    df = pd.DataFrame(
+        [{"代码": "510300", "名称": "沪深300ETF", "最新价": 4.0, "涨跌幅": 0.5}]
+    )
+    provider = AkshareProvider()
+    with (
+        patch("akshare.fund_etf_category_sina", side_effect=RuntimeError("blocked")),
+        patch(
+            "scx_stock.provider.akshare_provider._fetch_etf_list_sina_v2",
+            return_value=df,
+        ),
+    ):
+        items = await provider.list_etfs()
+
+    assert len(items) == 1
+    assert items[0].code == "510300"
+    assert items[0].type == "etf"
+
+
 @pytest.mark.asyncio
 async def test_provider_list_stock_quotes_empty_df():
     """全部数据源返回空 DataFrame 时，validate 校验拦截并抛 ProviderUnavailableError。"""
