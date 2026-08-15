@@ -54,6 +54,7 @@ class SettingsUpdate(BaseModel):
     smtp_from_name: str | None = None
     smtp_use_ssl: str | None = None
     notify_emails: str | None = None
+    auth_code_ttl_hours: str | None = Field(None, description="授权码有效期（小时）")
 
 
 @router.get("", response_model=ApiResponse, summary="获取当前应用配置")

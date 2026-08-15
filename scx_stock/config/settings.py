@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     # 生产环境留空，使用授权码认证
     test_token: str = ""
 
+    # 授权码有效期（小时），默认 72 小时（3 天），通过 SCX_AUTH_CODE_TTL_HOURS 配置
+    auth_code_ttl_hours: int = 72
+
     # 关注列表（逗号分隔的代码，股票/ETF 均可），供每日分析任务使用
     watchlist: str = ""
 

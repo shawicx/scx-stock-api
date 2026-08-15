@@ -37,7 +37,7 @@ api_router.include_router(settings.router)     # /api/v1/settings/*
 
 两种 token：
 1. **固定测试 token**：`.env` 设 `SCX_TEST_TOKEN`，匹配即通过（开发/测试）
-2. **动态授权码**：16 位大写字母+数字，24h TTL，存 `auth_code` 表
+2. **动态授权码**：16 位大写字母+数字，TTL 默认 3 天（`SCX_AUTH_CODE_TTL_HOURS` 可配），存 `auth_code` 表
 
 详见 [认证机制](auth.md)。
 

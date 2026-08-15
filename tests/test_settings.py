@@ -50,3 +50,19 @@ def test_env_file_value_is_absolute_path_string():
     env_file = settings_mod.Settings.model_config.get("env_file")
     assert isinstance(env_file, str)
     assert Path(env_file).is_absolute()
+
+
+def test_auth_code_ttl_default_and_env_override(monkeypatch):
+    """授权码有效期默认 72 小时（3 天），SCX_AUTH_CODE_TTL_HOURS 可覆盖。"""
+    settings_mod.get_settings.cache_clear()
+    try:
+        s = settings_mod.get_settings()
+        assert s.auth_code_ttl_hours == 72
+
+        monkeypatch.setenv("SCX_AUTH_CODE_TTL_HOURS", "168")
+        settings_mod.get_settings.cache_clear()
+        s_override = settings_mod.get_settings()
+        assert s_override.auth_code_ttl_hours == 168
+    finally:
+        settings_mod.get_settings.cache_clear()
+        monkeypatch.delenv("SCX_AUTH_CODE_TTL_HOURS", raising=False)

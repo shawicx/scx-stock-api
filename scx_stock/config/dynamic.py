@@ -27,6 +27,7 @@ _SETTING_KEYS = [
     "smtp_from_name",
     "smtp_use_ssl",
     "notify_emails",
+    "auth_code_ttl_hours",
 ]
 
 

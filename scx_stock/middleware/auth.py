@@ -3,7 +3,7 @@
 
 挂载到 api_router 和 admin 端点（/health 放行）。
 支持两种认证方式：
-  1. 动态授权码（16 位，通过 /auth/request-code 获取，有效期 24h，存 DB）
+  1. 动态授权码（16 位，通过 /auth/request-code 获取，有效期默认 3 天可配置，存 DB）
   2. 固定测试 token（通过 SCX_TEST_TOKEN 环境变量配置，用于测试/开发环境）
 """
 

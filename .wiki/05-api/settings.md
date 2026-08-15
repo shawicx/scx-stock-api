@@ -1,6 +1,6 @@
 # 应用配置接口
 
-> 在线查看/修改 LLM 与 SMTP 配置，测试连通性。需认证。`test-llm` / `test-smtp` 受限流。
+> 在线查看/修改 LLM、SMTP 与授权码配置，测试连通性。需认证。`test-llm` / `test-smtp` 受限流。
 
 源码：`scx_stock/api/v1/settings.py`、`scx_stock/config/dynamic.py`、`scx_stock/storage/repo.py`（settings 系列）。
 
@@ -10,7 +10,7 @@
 
 无参数。
 
-**响应 `data`**：`dict[str, str]`，包含 12 个动态配置键。
+**响应 `data`**：`dict[str, str]`，包含 13 个动态配置键。
 
 **敏感字段脱敏**（`settings.py:_mask`）：
 
@@ -32,6 +32,7 @@
 | `smtp_from_name` | 发件人名称 |
 | `smtp_use_ssl` | 是否 SSL |
 | `notify_emails` | 每日报告收件人（逗号分隔） |
+| `auth_code_ttl_hours` | 授权码有效期（小时），默认 72（3 天） |
 
 ---
 

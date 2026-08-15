@@ -24,7 +24,7 @@
 
 ---
 
-## 2. 动态配置键（12 个）
+## 2. 动态配置键（13 个）
 
 `dynamic.py:_SETTING_KEYS`（`:17`）：
 
@@ -33,6 +33,8 @@
 **SMTP（6）**：`smtp_host`、`smtp_port`、`smtp_user`、`smtp_password`、`smtp_from_name`、`smtp_use_ssl`
 
 **通知（1）**：`notify_emails`
+
+**认证（1）**：`auth_code_ttl_hours`（授权码有效期，小时）
 
 > 这些键同时存在于 `Settings`（`.env` 的 `SCX_` 前缀去掉即键名），保证回退链完整。
 
@@ -43,7 +45,7 @@
 | 函数 | 说明 |
 |------|------|
 | `get_dynamic_setting(key, default=None)`（`:33`） | 单键读取：DB → Settings → default；DB 错误不抛 |
-| `get_dynamic_settings(keys=None)`（`:56`） | 批量读取：`None` 读全部 12 键，合并 DB-over-`.env` |
+| `get_dynamic_settings(keys=None)`（`:56`） | 批量读取：`None` 读全部 13 键，合并 DB-over-`.env` |
 
 ---
 
@@ -55,6 +57,7 @@
 | `notify/email_sender.py:send_email` | **每次发信** | SMTP host/port/user/password/use_ssl |
 | `notify/email_sender.py:render_daily_report` | 每次渲染 | `smtp_from_name` |
 | `scheduler/analysis_job.py:run_daily_analysis` | 每次分析 | `notify_emails`（收件人） |
+| `api/v1/auth.py:request_auth_code` | **每次申请授权码** | `auth_code_ttl_hours`（有效期，非法值回退 72） |
 
 > 因为每次调用都动态读取，前端 `/settings` 修改后**无需重启**即生效。
 

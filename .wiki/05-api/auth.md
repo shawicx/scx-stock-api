@@ -11,7 +11,7 @@
 ```text
 ① 客户端 POST /api/v1/auth/request-code
      → 生成 16 位授权码（大写字母+数字）
-     → 存 DB auth_code 表（is_active=true, expires_at=now+24h）
+     → 存 DB auth_code 表（is_active=true, expires_at=now+TTL）
      → 邮件发送给 SCX_NOTIFY_EMAILS（+ 一个硬编码兜底邮箱）
 
 ② 客户端从邮箱拿到码，后续请求带 header：
@@ -64,7 +64,7 @@
 | 字符集 | `string.ascii_uppercase + string.digits`（避开易混淆字符） |
 | 长度 | 16 位 |
 | 生成 | `secrets.choice`（密码学安全随机） |
-| TTL | 24 小时（`_CODE_TTL_HOURS=24`，`auth.py:23`） |
+| TTL | 默认 72 小时（3 天）；前端设置页 / DB 动态配置优先，回退 `SCX_AUTH_CODE_TTL_HOURS`（`settings.py:auth_code_ttl_hours`） |
 | 存储 | DB `auth_code` 表（PK=code，`is_active` 索引） |
 | 失效 | `expires_at < now` 或 `is_active=false` 或不存在 |
 | DB 错误 | fail-closed（`validate_auth_code` 返回 False） |
