@@ -3,6 +3,8 @@
 """
 
 import logging
+import re
+from datetime import datetime
 
 from scx_stock.cache import keys
 from scx_stock.cache.backend import CacheBackend, get_cache
@@ -55,6 +57,33 @@ def _classify_market(code: str) -> str:
     return "A股"
 
 
+def _strip_code_prefix(code: str) -> str:
+    """去掉代码的市场前缀（部分数据源返回 sz300209 形式，统一为纯数字）。
+
+    :param code: 股票代码（可能带 sh/sz/bj 前缀）。
+    :returns: 纯数字股票代码。
+    """
+    return re.sub(r"^(sh|sz|bj)", "", code, flags=re.IGNORECASE)
+
+
+def _market_of_code(code: str) -> str:
+    """按纯数字代码推断市场名（与 Provider 的 _classify_market 规则一致）。
+
+    用于兜底构造 StockInfo：列表项 market 可能为"其他"（带前缀代码误判），
+    按剥离前缀后的代码重判更可靠。
+
+    :param code: 纯数字股票代码。
+    :returns: 市场名（上证/深证/北交所/其他）。
+    """
+    if code.startswith("6"):
+        return "上证"
+    if code.startswith(("0", "3")):
+        return "深证"
+    if code.startswith(("4", "8")):
+        return "北交所"
+    return "其他"
+
+
 class StockRepository:
     """个股领域 Repository，负责选源、降级、缓存。
 
@@ -65,40 +94,85 @@ class StockRepository:
         self._cache = cache
 
     async def get_stock(self, code: str) -> StockInfo:
-        """获取个股基础信息（带缓存）。
+        """获取个股基础信息（带缓存；逐股接口失败时从行情列表兜底）。
 
         :param code: 股票代码。
         :returns: StockInfo。
-        :raises NotFoundError: 代码不存在。
+        :raises NotFoundError: 代码不存在（逐股接口与行情列表均无此代码）。
         """
         cache_key = f"stock:info:{code}"
         cached = await self._cache.get(cache_key)
         if cached:
             return StockInfo(**cached)
 
-        info = await self._call_with_fallback(
-            "stock", code, lambda p: p.get_stock(code)
-        )
+        try:
+            info = await self._call_with_fallback(
+                "stock", code, lambda p: p.get_stock(code)
+            )
+        except NotFoundError:
+            # 逐股信息接口（stock_individual_info_em）易被限流/抖动，
+            # 失败时从全市场行情列表兜底（列表被 /stock/list 轮询保热，含 code/name/market/industry）
+            item = await self._lookup_in_quote_list(code)
+            info = StockInfo(
+                code=code,
+                name=item.name,
+                market=_market_of_code(code),
+                industry=item.industry,
+            )
         await self._cache.set(cache_key, _info_to_dict(info), _TTL_STOCK_INFO)
         return info
 
     async def get_quote(self, code: str) -> Quote:
-        """获取个股实时行情（带缓存）。
+        """获取个股实时行情（带缓存；逐股接口失败时从行情列表兜底）。
 
         :param code: 股票代码。
         :returns: Quote。
-        :raises NotFoundError: 代码不存在。
+        :raises NotFoundError: 代码不存在（逐股接口与行情列表均无此代码）。
         """
         cache_key = keys.stock_quote(code)
         cached = await self._cache.get(cache_key)
         if cached:
             return _quote_from_dict(cached)
 
-        quote = await self._call_with_fallback(
-            "stock", code, lambda p: p.get_quote(code)
-        )
+        try:
+            quote = await self._call_with_fallback(
+                "stock", code, lambda p: p.get_quote(code)
+            )
+        except NotFoundError:
+            item = await self._lookup_in_quote_list(code)
+            quote = Quote(
+                code=code,
+                name=item.name,
+                price=item.price,
+                prev_close=item.prev_close,
+                change=item.change,
+                change_pct=item.change_pct,
+                volume=item.volume,
+                amount=item.amount,
+                high=item.high,
+                low=item.low,
+                open=item.open,
+                timestamp=datetime.now().isoformat(timespec="seconds"),
+            )
         await self._cache.set(cache_key, quote.to_dict(), _TTL_QUOTE)
         return quote
+
+    async def _lookup_in_quote_list(self, code: str) -> StockListItem:
+        """在全市场行情列表中查找个股（逐股接口失败时的兜底数据源）。
+
+        行情列表被 /stock/list 轮询保热（TTL 120s 缓存），回源时另有
+        em/新浪/腾讯三级 fallback，整体比逐股接口稳定。
+
+        :param code: 股票代码（纯数字）。
+        :returns: 匹配的 StockListItem。
+        :raises NotFoundError: 列表中不存在该代码。
+        """
+        items = await self.list_stock_quotes()
+        for item in items:
+            # 部分数据源的列表代码带 sz/sh 前缀，剥离后匹配
+            if _strip_code_prefix(item.code) == code:
+                return item
+        raise NotFoundError(f"stock not found: {code}")
 
     async def list_stock_quotes(self) -> list[StockListItem]:
         """获取 A 股全市场实时行情列表（带缓存）。
