@@ -248,7 +248,9 @@ async def sync_kline(codes: list[str] | None = None) -> dict[str, int]:
                 new_bars = kline.bars
 
             if not new_bars:
-                logger.debug("sync_kline %s: 无新数据", code)
+                logger.warning(
+                    "sync_kline %s: 无新数据（last_date=%s），数据源可能未更新或被反爬", code, last_date
+                )
                 synced += 1
                 continue
 

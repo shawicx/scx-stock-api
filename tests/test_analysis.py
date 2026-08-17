@@ -1,8 +1,10 @@
 """
-@description 支撑位分析引擎测试：indicators / support / trend / engine / fallback_summary。
+@description 支撑位分析引擎测试：indicators / support / trend / engine / fallback_summary / 新鲜度校验。
 """
 
+import contextlib
 from datetime import date, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -16,7 +18,9 @@ from scx_stock.analysis.indicators import (
 )
 from scx_stock.analysis.support import _strength_label, find_resistances, find_supports
 from scx_stock.analysis.trend import judge_trend
+from scx_stock.scheduler import analysis_job
 from scx_stock.schema.kline import Kline, KlineBar
+from scx_stock.storage import repo as repo_mod
 
 
 # ---------------------------------------------------------------------------
@@ -241,3 +245,151 @@ class TestEngine:
         report = analyze(kline)
         summary = fallback_summary(report)
         assert "分析失败" in summary
+
+
+# ---------------------------------------------------------------------------
+# _analyze_one K 线新鲜度校验测试
+# ---------------------------------------------------------------------------
+
+_FRESH_DAY = date(2026, 8, 17)  # 周一，最近交易日
+_STALE_DAY = date(2026, 8, 14)  # 上周五，陈旧
+
+
+def _make_bars_ending(end: date, n: int = 120) -> list[KlineBar]:
+    """生成结束于 end 日、缓慢递增的 K 线（日期连续，仅供日期新鲜度比较）。
+
+    :param end: 最后一根 bar 的交易日。
+    :param n: K 线根数。
+    :returns: KlineBar 列表（按日期升序）。
+    """
+    start = end - timedelta(days=n - 1)
+    bars = []
+    for i in range(n):
+        close = round(4.0 + i * 0.01, 3)
+        bars.append(
+            KlineBar(
+                trade_date=start + timedelta(days=i),
+                open=round(close - 0.02, 3),
+                close=close,
+                high=round(close + 0.03, 3),
+                low=round(close - 0.03, 3),
+                volume=100000 + i * 100,
+            )
+        )
+    return bars
+
+
+def _identity_interpret() -> AsyncMock:
+    """构造原样返回 report 的 interpret 替身，避免测试触发 LLM。"""
+    return AsyncMock(side_effect=lambda r: r)
+
+
+class TestAnalyzeOneFreshness:
+    """_analyze_one 应拒绝陈旧 K 线，确保报告 trade_date 不落后于最近交易日。"""
+
+    @pytest.mark.asyncio
+    async def test_fresh_db_kline_skips_provider(self):
+        """DB K 线已覆盖最近交易日时直接使用，不回退 Provider。"""
+        kline = Kline(code="159327", bars=_make_bars_ending(_FRESH_DAY))
+        with (
+            patch.object(analysis_job.repo, "load_kline", new=AsyncMock(return_value=kline)),
+            patch.object(analysis_job.repo, "latest_trade_date", new=AsyncMock(return_value=_FRESH_DAY)),
+            patch.object(analysis_job.AkshareProvider, "get_kline", new=AsyncMock()) as m_get,
+            patch.object(analysis_job, "interpret", new=_identity_interpret()),
+        ):
+            report = await analysis_job._analyze_one(
+                analysis_job.AkshareProvider(), "159327", 120, name="测试ETF"
+            )
+
+        assert report.ok is True
+        assert report.trade_date == _FRESH_DAY
+        m_get.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stale_db_falls_back_to_provider(self):
+        """DB K 线落后于最近交易日时回退 Provider 重拉并回填 DB。"""
+        stale = Kline(code="159327", bars=_make_bars_ending(_STALE_DAY))
+        fresh = Kline(code="159327", bars=_make_bars_ending(_FRESH_DAY))
+        with (
+            patch.object(analysis_job.repo, "load_kline", new=AsyncMock(return_value=stale)),
+            patch.object(analysis_job.repo, "latest_trade_date", new=AsyncMock(return_value=_FRESH_DAY)),
+            patch.object(analysis_job.AkshareProvider, "get_kline", new=AsyncMock(return_value=fresh)),
+            patch.object(analysis_job.repo, "upsert_klines", new=AsyncMock(return_value=1)) as m_up,
+            patch.object(analysis_job, "interpret", new=_identity_interpret()),
+        ):
+            report = await analysis_job._analyze_one(
+                analysis_job.AkshareProvider(), "159327", 120, name="测试ETF"
+            )
+
+        assert report.ok is True
+        assert report.trade_date == _FRESH_DAY
+        m_up.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_stale_db_provider_error_fails_honestly(self):
+        """DB 过期且 Provider 拉取失败时如实返回 ok=False，不用旧数据生成报告。"""
+        stale = Kline(code="159327", bars=_make_bars_ending(_STALE_DAY))
+        with (
+            patch.object(analysis_job.repo, "load_kline", new=AsyncMock(return_value=stale)),
+            patch.object(analysis_job.repo, "latest_trade_date", new=AsyncMock(return_value=_FRESH_DAY)),
+            patch.object(
+                analysis_job.AkshareProvider,
+                "get_kline",
+                new=AsyncMock(side_effect=RuntimeError("all sources failed")),
+            ),
+            patch.object(analysis_job, "interpret", new=_identity_interpret()),
+        ):
+            report = await analysis_job._analyze_one(
+                analysis_job.AkshareProvider(), "159327", 120, name="测试ETF"
+            )
+
+        assert report.ok is False
+        assert "未更新到" in report.error
+
+    @pytest.mark.asyncio
+    async def test_stale_db_provider_also_stale_fails_honestly(self):
+        """DB 与数据源都落后于最近交易日时如实返回 ok=False。"""
+        stale = Kline(code="159327", bars=_make_bars_ending(_STALE_DAY))
+        with (
+            patch.object(analysis_job.repo, "load_kline", new=AsyncMock(return_value=stale)),
+            patch.object(analysis_job.repo, "latest_trade_date", new=AsyncMock(return_value=_FRESH_DAY)),
+            patch.object(analysis_job.AkshareProvider, "get_kline", new=AsyncMock(return_value=stale)),
+            patch.object(analysis_job, "interpret", new=_identity_interpret()),
+        ):
+            report = await analysis_job._analyze_one(
+                analysis_job.AkshareProvider(), "159327", 120, name="测试ETF"
+            )
+
+        assert report.ok is False
+        assert "未更新到" in report.error
+
+
+class TestLatestTradeDate:
+    """latest_trade_date：取 ≤ 截止日的最近交易日。"""
+
+    @pytest.mark.asyncio
+    async def test_reads_calendar_from_db(self):
+        """DB 日历可用时返回 ≤ 截止日的最大开市日。"""
+        fake_result = MagicMock()
+        fake_result.scalar_one_or_none.return_value = date(2026, 8, 17)
+
+        @contextlib.asynccontextmanager
+        async def _factory_ctx():
+            yield MagicMock(execute=AsyncMock(return_value=fake_result))
+
+        with patch.object(repo_mod, "get_session_factory", new=lambda: _factory_ctx):
+            result = await repo_mod.latest_trade_date(date(2026, 8, 17))
+
+        assert result == date(2026, 8, 17)
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_weekday_when_db_down(self):
+        """DB 不可用时回退星期推算：周日活动日取上周五。"""
+
+        def _boom():
+            raise RuntimeError("db down")
+
+        with patch.object(repo_mod, "get_session_factory", new=_boom):
+            result = await repo_mod.latest_trade_date(date(2026, 8, 16))  # 周日
+
+        assert result == date(2026, 8, 14)  # 上周五

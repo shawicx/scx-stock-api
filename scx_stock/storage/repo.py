@@ -4,7 +4,7 @@
 
 import logging
 from collections.abc import Iterable
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy import delete, func, select
@@ -574,6 +574,41 @@ async def is_trading_day(d: date | None = None) -> bool:
 
     # DB 无记录时回退为星期判断
     return d.weekday() < 5
+
+
+async def latest_trade_date(d: date | None = None) -> date:
+    """取 ≤ d 的最近交易日（DB market_calendar 有记录以记录为准）。
+
+    用于校验 K 线新鲜度：K 线最后一根 bar 应覆盖到该日期。DB 不可用或
+    无记录时回退为星期推算（向前找第一个周一至五），节假日以 DB 记录为准。
+
+    :param d: 截止日期，默认今天。
+    :returns: ≤ d 的最近交易日。
+
+    :example await latest_trade_date(date(2026, 8, 16))  # 周日 → 2026-08-14（周五）
+    """
+    if d is None:
+        d = date.today()
+
+    try:
+        factory = get_session_factory()
+        async with factory() as session:
+            result = await session.execute(
+                select(func.max(MarketCalendarModel.trade_date)).where(
+                    MarketCalendarModel.trade_date <= d,
+                    MarketCalendarModel.is_open.is_(True),
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is not None:
+                return row
+    except Exception as e:  # noqa: BLE001
+        logger.warning("latest_trade_date DB query failed: %s", e)
+
+    # DB 无记录时回退：向前找第一个周一至五
+    while d.weekday() >= 5:
+        d = d - timedelta(days=1)
+    return d
 
 
 # ---------------------------------------------------------------------------

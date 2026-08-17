@@ -24,8 +24,10 @@ async def _analyze_one(
 ) -> AnalysisReport:
     """分析单只标的：拉 K 线 → 计算支撑位 → AI 解读。
 
-    K 线优先从 DB 读取（sync_kline 定时任务预置），DB 不足时回退 Provider 拉取
-    并顺带落库。任何步骤失败都返回 ok=False 的 report，不抛异常。
+    K 线优先从 DB 读取（sync_kline 定时任务预置），DB 不足或未覆盖到最近
+    交易日（陈旧）时回退 Provider 拉取并顺带落库；数据源同样陈旧或拉取
+    失败时如实返回 ok=False，拒绝用陈旧数据生成旧日期报告。任何步骤失败
+    都返回 ok=False 的 report，不抛异常。
 
     :param provider: AkShare Provider 实例。
     :param code: 证券代码。
@@ -33,19 +35,44 @@ async def _analyze_one(
     :param name: 标的名称（来自 DB 或调用方），回填到 report。
     :returns: AnalysisReport。
     """
-    # 1. 优先从 DB 读 K 线
+    # 0. K 线应覆盖到的最近交易日（含今天），用于新鲜度校验
+    expected = await repo.latest_trade_date()
+
+    # 1. 优先从 DB 读 K 线；最后一根 bar 未到最近交易日视为陈旧
     kline = await repo.load_kline(code, days)
-    used_db = kline is not None and len(kline.bars) >= 30
+    used_db = (
+        kline is not None
+        and len(kline.bars) >= 30
+        and kline.bars[-1].trade_date >= expected
+    )
 
     if not used_db:
-        # 2. DB 不足时回退 Provider 拉取
+        # 2. DB 不足或陈旧时回退 Provider 拉取
         try:
             kline = await provider.get_kline(code, days=days)
         except Exception as e:  # noqa: BLE001
             logger.warning("拉取 K 线失败 %s: %s", code, e)
-            return AnalysisReport(code=code, name=name, ok=False, error=f"拉取 K 线失败: {e}")
+            return AnalysisReport(
+                code=code,
+                name=name,
+                ok=False,
+                error=f"K 线未更新到 {expected}，拒绝以陈旧数据生成报告（拉取失败: {e}）",
+            )
 
-        # 3. 顺带落库（容错，不阻断分析）
+        # 3. 数据源也落后于最近交易日时如实失败，不用旧数据冒充当日分析
+        if len(kline.bars) < 30 or kline.bars[-1].trade_date < expected:
+            actual = kline.bars[-1].trade_date if kline.bars else None
+            logger.warning(
+                "K 线数据陈旧 %s: 最近交易日=%s 数据源最新=%s", code, expected, actual
+            )
+            return AnalysisReport(
+                code=code,
+                name=name,
+                ok=False,
+                error=f"K 线未更新到 {expected}，拒绝以陈旧数据生成报告（数据源最新: {actual}）",
+            )
+
+        # 4. 顺带落库（容错，不阻断分析）
         try:
             rows = [
                 {
