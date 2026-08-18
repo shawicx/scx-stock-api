@@ -100,7 +100,7 @@ codes 来源：参数 → DB watchlist → SCX_WATCHLIST
 5. repo.upsert_analysis_reports(reports)  # 即使 dry_run 也落库（跳过 trade_date None）
 6. 非 dry_run：
    - 读 notify_emails（动态配置）
-   - success > 0 且有收件人 → render_daily_report → send_email
+   - 有报告且有收件人 → render_daily_report → send_email（全部失败也发，避免静默无邮件）
 7. 返回 {analyzed, success, failed, sent, reports, elapsed}
 ```
 

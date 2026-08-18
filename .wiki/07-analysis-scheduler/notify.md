@@ -70,7 +70,7 @@ send_email(recipients, html, retries=2):
 ```text
 scheduler daily_analysis_job（每日 21:00，非交易日跳过）
   → run_daily_analysis(dry_run=False)
-    → 成功报告数 > 0 且有收件人
+    → 有分析结果且有收件人（全部失败也发，模板渲染红色失败卡片）
       → render_daily_report(reports)
       → send_email(recipients, html)
 ```

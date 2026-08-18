@@ -166,7 +166,9 @@ async def run_daily_analysis(
         cfg = await get_dynamic_settings(["notify_emails"])
         notify_raw = cfg.get("notify_emails") or ""
         recipients = [e.strip() for e in notify_raw.split(",") if e.strip()]
-        if recipients and success > 0:
+        # 只要有分析结果就发送：全部失败也发（模板渲染红色失败卡片），
+        # 避免 success=0 时静默跳过导致用户收不到任何邮件
+        if recipients and reports:
             html = await render_daily_report(reports)
             sent, send_error = await send_email(recipients, html)
             if not sent and send_error:

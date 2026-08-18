@@ -19,6 +19,7 @@ from scx_stock.analysis.indicators import (
 from scx_stock.analysis.support import _strength_label, find_resistances, find_supports
 from scx_stock.analysis.trend import judge_trend
 from scx_stock.scheduler import analysis_job
+from scx_stock.schema.analysis import AnalysisReport
 from scx_stock.schema.kline import Kline, KlineBar
 from scx_stock.storage import repo as repo_mod
 
@@ -393,3 +394,68 @@ class TestLatestTradeDate:
             result = await repo_mod.latest_trade_date(date(2026, 8, 16))  # 周日
 
         assert result == date(2026, 8, 14)  # 上周五
+
+
+# ---------------------------------------------------------------------------
+# run_daily_analysis 邮件发送测试
+# ---------------------------------------------------------------------------
+
+
+class TestRunDailyAnalysisEmail:
+    """run_daily_analysis：分析完成后立即发送邮件，全部失败也发。"""
+
+    @pytest.mark.asyncio
+    async def test_all_failed_still_sends_email(self):
+        """全部标的分析失败时仍发送邮件（红色失败卡片），不再静默跳过。"""
+        report = AnalysisReport(
+            code="159327", name="测试ETF", ok=False, error="K 线未更新到 2026-08-17"
+        )
+        with (
+            patch.object(analysis_job.repo, "list_watchlist_codes", new=AsyncMock(return_value=["159327"])),
+            patch.object(analysis_job, "_resolve_names", new=AsyncMock(return_value={})),
+            patch.object(analysis_job, "_analyze_one", new=AsyncMock(return_value=report)),
+            patch.object(analysis_job.repo, "upsert_analysis_reports", new=AsyncMock(return_value=1)),
+            patch.object(analysis_job, "get_dynamic_settings", new=AsyncMock(return_value={"notify_emails": "a@b.c, d@e.f"})),
+            patch.object(analysis_job, "render_daily_report", new=AsyncMock(return_value="<html></html>")),
+            patch.object(analysis_job, "send_email", new=AsyncMock(return_value=(True, ""))) as m_send,
+        ):
+            result = await analysis_job.run_daily_analysis(dry_run=False)
+
+        assert result["success"] == 0
+        assert result["sent"] is True
+        m_send.assert_awaited_once()
+        assert m_send.await_args.args[0] == ["a@b.c", "d@e.f"]
+
+    @pytest.mark.asyncio
+    async def test_dry_run_never_sends_email(self):
+        """dry_run=True 只分析不发邮件。"""
+        report = AnalysisReport(code="159327", name="测试ETF", ok=True, trade_date=_FRESH_DAY)
+        with (
+            patch.object(analysis_job.repo, "list_watchlist_codes", new=AsyncMock(return_value=["159327"])),
+            patch.object(analysis_job, "_resolve_names", new=AsyncMock(return_value={})),
+            patch.object(analysis_job, "_analyze_one", new=AsyncMock(return_value=report)),
+            patch.object(analysis_job.repo, "upsert_analysis_reports", new=AsyncMock(return_value=1)),
+            patch.object(analysis_job, "send_email", new=AsyncMock(return_value=(True, ""))) as m_send,
+        ):
+            result = await analysis_job.run_daily_analysis(dry_run=True)
+
+        assert result["success"] == 1
+        assert result["sent"] is False
+        m_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_recipients_skips_email(self):
+        """未配置收件人时跳过发送。"""
+        report = AnalysisReport(code="159327", name="测试ETF", ok=True, trade_date=_FRESH_DAY)
+        with (
+            patch.object(analysis_job.repo, "list_watchlist_codes", new=AsyncMock(return_value=["159327"])),
+            patch.object(analysis_job, "_resolve_names", new=AsyncMock(return_value={})),
+            patch.object(analysis_job, "_analyze_one", new=AsyncMock(return_value=report)),
+            patch.object(analysis_job.repo, "upsert_analysis_reports", new=AsyncMock(return_value=1)),
+            patch.object(analysis_job, "get_dynamic_settings", new=AsyncMock(return_value={"notify_emails": ""})),
+            patch.object(analysis_job, "send_email", new=AsyncMock(return_value=(True, ""))) as m_send,
+        ):
+            result = await analysis_job.run_daily_analysis(dry_run=False)
+
+        assert result["sent"] is False
+        m_send.assert_not_awaited()
