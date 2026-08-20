@@ -21,6 +21,11 @@ from scx_stock.scheduler.analysis_job import daily_analysis_job
 
 logger = logging.getLogger(__name__)
 
+# 调度时区（北京时间）。CronTrigger.from_crontab 不传 timezone 时会回退到
+# 系统本地时区——生产容器为 UTC，导致 21:00 的任务实际在次日 05:00（CST）
+# 触发，因此必须显式指定，不能依赖调度器级 timezone 设置向下传播。
+_TZ = "Asia/Shanghai"
+
 # 默认调度计划（可被 Settings 覆盖）：
 #   - 每日 09:00 同步股票列表（sync_all 内部串行：股票+ETF+行业+索引）
 #   - 每日 09:10 同步 ETF 列表
@@ -67,7 +72,7 @@ class SchedulerRunner:
     """
 
     def __init__(self) -> None:
-        self._scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+        self._scheduler = AsyncIOScheduler(timezone=_TZ)
 
     def setup(self) -> None:
         """注册默认任务（不立即启动）。"""
@@ -79,7 +84,7 @@ class SchedulerRunner:
                 continue
             # daily_analysis 的 cron 动态取自 SCX_ANALYSIS_CRON
             cron = cfg["cron"] or s.analysis_cron
-            trigger = CronTrigger.from_crontab(cron)
+            trigger = CronTrigger.from_crontab(cron, timezone=_TZ)
             self._scheduler.add_job(
                 func,
                 trigger=trigger,

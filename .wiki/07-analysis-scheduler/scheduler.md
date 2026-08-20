@@ -8,8 +8,10 @@
 
 ## 1. 调度配置（`runner.py`）
 
-- **时区**：`Asia/Shanghai`（`runner.py:70`）
-- **misfire_grace_time**：600s（`runner.py:89`）
+- **时区**：`Asia/Shanghai`——必须显式传给 `CronTrigger.from_crontab(cron, timezone=...)`；
+  调度器级 `AsyncIOScheduler(timezone=...)` 不会向下传播，from_crontab 缺省回退系统本地
+  时区（生产容器为 UTC，曾导致 21:00 任务实际在次日 05:00 CST 触发）
+- **misfire_grace_time**：600s（`runner.py`）
 - **触发器**：`CronTrigger.from_crontab`
 - `get_scheduler()`（`:109`）单例，首次调用执行 `setup()`
 - lifespan 启动时 `scheduler.start()`，关闭时 `scheduler.shutdown()`
