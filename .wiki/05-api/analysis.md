@@ -72,8 +72,14 @@
 | `support_2` | SupportLevel\|null | 第二支撑位 |
 | `resistance_1` | SupportLevel\|null | 第一压力位 |
 | `trend` | str | 趋势：多头/空头/震荡/未知/数据不足 |
+| `trend_note` | str | 趋势备注（MA60 缺失降级时说明，默认 `""`） |
 | `ma20` | float\|null | MA20 |
 | `ma60` | float\|null | MA60 |
+| `volume_ratio` | float\|null | 量比（最新量/前5根均量） |
+| `rsi14` | float\|null | RSI(14) |
+| `macd_dif` / `macd_dea` / `macd_hist` | float\|null | MACD(12,26,9) DIF/DEA/柱 |
+| `kdj_j` | float\|null | KDJ(9,3,3) J 值 |
+| `change_5d` / `change_20d` | float\|null | 近5/20日涨跌幅（%） |
 | `summary` | str | AI 解读摘要（LLM 失败时为规则模板） |
 | `ok` | bool | 分析是否成功（默认 true） |
 | `error` | str | 失败原因（默认 `""`） |

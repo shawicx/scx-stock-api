@@ -68,6 +68,11 @@
 </td>
 </tr>
 {% endif %}
+{% if item.indicator_line %}
+<tr>
+<td colspan="2" style="padding:4px 0;color:#5f6368;font-size:12px;">{{ item.indicator_line }}</td>
+</tr>
+{% endif %}
 </table>
 
 {% if item.summary %}

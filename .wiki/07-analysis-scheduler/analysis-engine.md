@@ -34,6 +34,11 @@
 | 函数 | 说明 | 参数 |
 |------|------|------|
 | `calc_ma(close, period)` | 简单移动平均最新值（`ta.sma`） | 数据不足返回 None |
+| `calc_macd(close)` | MACD(12,26,9) 最新值（`ta.macd`） | 返回 `(DIF, DEA, 柱)`，数据不足返回 None |
+| `calc_rsi(close, period=14)` | RSI 最新值（`ta.rsi`） | 数据不足返回 None |
+| `calc_kdj(df)` | KDJ(9,3,3) 最新值（`ta.kdj`） | 返回 `(K, D, J)`，数据不足返回 None |
+| `calc_volume_ratio(df, period=5)` | 量比 = 最新成交量 / 前 5 根均量 | 数据不足或零均量返回 None |
+| `calc_period_change(close, days)` | 近 N 日涨跌幅（%） | 数据不足返回 None |
 | `calc_boll_lower(close)` | 布林下轨（`ta.bbands length=20, std=2`，读 `BBL_20_2.0`） | |
 | `calc_pivot_points(high, low, close)` | 经典枢轴点（前日 H/L/C） | pivot/r1/r2/s1/s2，4 位小数 |
 | `calc_recent_low(df, days)` | 最近 N 日最低 | 取 `df["low"]` 末尾 days 行 min |
@@ -87,21 +92,22 @@ r2 = pivot + (high-low)  s2 = pivot - (high-low)
 
 ---
 
-## 4. 趋势判断（`trend.py:10` `judge_trend`）
+## 4. 趋势判断（`trend.py:11` `judge_trend`）
 
 | 条件 | 趋势 |
 |------|------|
 | `close > MA20 > MA60` | `多头` |
 | `close < MA20 < MA60` | `空头` |
 | 其他 | `震荡` |
+| MA60 缺失（历史 < 60 根） | 退化为 `close` 与 MA20 比较（仍输出 多头/空头/震荡），engine 同时在 `trend_note` 注明降级 |
+| 连 MA20 都无法计算 | `数据不足` |
 | 空序列 | `未知` |
-| MA 数据不足 | `数据不足` |
 
 ---
 
-## 5. 降级摘要（`engine.py:72` `fallback_summary`）
+## 5. 降级摘要（`engine.py` `fallback_summary`）
 
-LLM 不可用时用规则模板拼接：趋势 + MA20 位置 + 支撑/压力价位。
+LLM 不可用时用规则模板拼接：趋势（无法判断时如实说明，不生造"数据不足趋势"病句）+ `trend_note` + 当日/近5日/近20日涨跌 + MA20 位置 + 量比（≥1.5 放量 / ≤0.7 缩量）+ MACD 方向 + RSI 超买(≥70)/超卖(≤30) + 支撑/压力价位（含距离%）。
 
 ---
 

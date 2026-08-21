@@ -41,18 +41,19 @@ OpenAI 兼容异步客户端（`AsyncOpenAI`）。**配置每次调用动态读�
    - 正常    → 使用 LLM 返回文本
 ```
 
-### 2.1 System Prompt（`interpreter.py:15`）
+### 2.1 System Prompt（`interpreter.py`）
 
 要求模型作为 ETF/股票技术分析师：
-- 输出 100–200 字中文摘要
+- 输出 150–250 字中文摘要
 - **只用提供的数字，不编造**
-- 覆盖趋势/支撑/压力/明日关注
+- 综合趋势、均线、量能（量比）与动量（MACD/RSI/KDJ）；信号方向不一致时须指出并解释
+- 覆盖趋势与动量状态、支撑/压力、明日关注点
 - 附免责声明
 - 不用 Markdown 标题
 
-### 2.2 User Prompt（`_build_user_prompt`，`interpreter.py:26`）
+### 2.2 User Prompt（`_build_user_prompt`）
 
-序列化：name、code、date、close、change_pct、trend、MA20/MA60，以及每个支撑/压力位的 price/distance_pct/sources/strength。
+序列化：name、code、date、close、当日/近5日/近20日涨跌幅、trend（含 `trend_note` 备注）、MA20/MA60、量比、RSI(14)、MACD（DIF/DEA/柱）、KDJ J 值，以及每个支撑/压力位的 price/distance_pct/sources/strength。
 
 ---
 

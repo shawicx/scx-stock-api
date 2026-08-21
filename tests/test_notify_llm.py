@@ -147,3 +147,76 @@ class TestInterpreterFallback:
         report = _make_report(ok=False, error="K 线拉取失败")
         result = await interpret(report)
         assert "K 线拉取失败" in result.summary
+
+
+class TestBuildUserPrompt:
+    """LLM user prompt 应携带量能/动量等增强指标。"""
+
+    def test_prompt_contains_indicators(self):
+        """prompt 包含量比、RSI、MACD、KDJ 与近期涨跌。"""
+        from scx_stock.llm.interpreter import _build_user_prompt
+
+        report = _make_report(
+            volume_ratio=1.23,
+            rsi14=56.2,
+            macd_dif=0.012,
+            macd_dea=0.008,
+            macd_hist=0.004,
+            kdj_j=78.5,
+            change_5d=1.2,
+            change_20d=-0.5,
+        )
+        prompt = _build_user_prompt(report)
+        assert "量比" in prompt and "1.23" in prompt
+        assert "RSI" in prompt and "56.2" in prompt
+        assert "MACD" in prompt and "0.012" in prompt
+        assert "KDJ" in prompt
+        assert "近5日涨跌幅" in prompt
+        assert "近20日涨跌幅" in prompt
+
+    def test_prompt_omits_trend_note_when_empty(self):
+        """无趋势备注时 prompt 不包含备注行。"""
+        from scx_stock.llm.interpreter import _build_user_prompt
+
+        prompt = _build_user_prompt(_make_report())
+        assert "趋势备注" not in prompt
+
+    def test_prompt_includes_trend_note(self):
+        """有趋势备注时 prompt 透传。"""
+        from scx_stock.llm.interpreter import _build_user_prompt
+
+        report = _make_report(trend_note="历史K线不足60根，趋势仅基于20日均线判断")
+        prompt = _build_user_prompt(report)
+        assert "趋势备注：历史K线不足60根" in prompt
+
+
+class TestEmailIndicatorLine:
+    """邮件渲染应输出指标行。"""
+
+    @pytest.mark.asyncio
+    async def test_render_indicator_line(self):
+        """报告含指标数据时邮件出现指标行。"""
+        from scx_stock.notify.email_sender import render_daily_report
+
+        report = _make_report(
+            volume_ratio=1.23,
+            rsi14=56.2,
+            macd_dif=0.012,
+            macd_dea=0.008,
+            macd_hist=0.004,
+            kdj_j=78.5,
+            change_5d=1.2,
+        )
+        html = await render_daily_report([report])
+        assert "量比 1.23" in html
+        assert "RSI 56.2" in html
+        assert "MACD 多头" in html
+        assert "近5日 +1.20%" in html
+
+    @pytest.mark.asyncio
+    async def test_render_without_indicators(self):
+        """旧报告（无指标字段）渲染不出现空指标行。"""
+        from scx_stock.notify.email_sender import render_daily_report
+
+        html = await render_daily_report([_make_report()])
+        assert "量比" not in html

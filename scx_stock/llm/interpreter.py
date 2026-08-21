@@ -14,12 +14,14 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = (
     "你是一名严谨的 ETF/股票技术分析师。根据程序计算出的结构化技术分析结果，"
-    "用简洁的中文生成一段（100~200字）投资观察摘要。\n"
+    "用简洁的中文生成一段（150~250字）投资观察摘要。\n"
     "严格要求：\n"
     "1. 只能使用输入中给出的数值，严禁编造或修改任何价格、百分比、指标值。\n"
-    "2. 内容包括：当前趋势、关键支撑位与压力位、明日关注点。\n"
-    "3. 末尾加一句简短免责：以上为技术分析参考，不构成投资建议。\n"
-    "4. 不要使用 Markdown 标题，输出纯文本段落，务必完整不要截断。"
+    "2. 综合趋势、均线、量能（量比）与动量（MACD/RSI/KDJ）进行分析，"
+    "若各信号方向不一致（如趋势偏空但当日上涨），须明确指出并给出可能的解释。\n"
+    "3. 内容包括：当前趋势与动量状态、关键支撑位与压力位、明日关注点。\n"
+    "4. 末尾加一句简短免责：以上为技术分析参考，不构成投资建议。\n"
+    "5. 不要使用 Markdown 标题，输出纯文本段落，务必完整不要截断。"
 )
 
 
@@ -34,10 +36,18 @@ def _build_user_prompt(report: AnalysisReport) -> str:
         f"日期：{report.trade_date}",
         f"收盘价：{report.close}",
         f"当日涨跌幅：{report.change_pct}%",
+        f"近5日涨跌幅：{report.change_5d}%",
+        f"近20日涨跌幅：{report.change_20d}%",
         f"趋势状态：{report.trend}",
         f"MA20：{report.ma20}",
         f"MA60：{report.ma60}",
+        f"量比（最新成交量/前5日均量）：{report.volume_ratio}",
+        f"RSI(14)：{report.rsi14}",
+        f"MACD：DIF {report.macd_dif}，DEA {report.macd_dea}，柱 {report.macd_hist}",
+        f"KDJ J值：{report.kdj_j}",
     ]
+    if report.trend_note:
+        lines.append(f"趋势备注：{report.trend_note}")
 
     if report.support_1:
         lines.append(

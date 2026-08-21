@@ -39,6 +39,27 @@ def _format_pct(val: float | None) -> str:
     return f"{val:+.2f}"
 
 
+def _build_indicator_line(report: AnalysisReport) -> str:
+    """把量比/RSI/MACD/KDJ/近期涨跌拼为一行指标摘要（空字段跳过）。
+
+    :param report: 分析结果。
+    :returns: 形如 "量比 1.23 ｜ RSI 56.2 ｜ MACD 多头 ｜ 近5日 +1.20%" 的字符串。
+    """
+    pieces: list[str] = []
+    if report.volume_ratio is not None:
+        pieces.append(f"量比 {report.volume_ratio}")
+    if report.rsi14 is not None:
+        pieces.append(f"RSI {report.rsi14}")
+    if report.macd_dif is not None and report.macd_dea is not None:
+        state = "多头" if report.macd_dif > report.macd_dea else "空头"
+        pieces.append(f"MACD {state}")
+    if report.kdj_j is not None:
+        pieces.append(f"KDJ-J {report.kdj_j}")
+    if report.change_5d is not None:
+        pieces.append(f"近5日 {_format_pct(report.change_5d)}%")
+    return " ｜ ".join(pieces)
+
+
 def _report_to_template_item(report: AnalysisReport) -> dict:
     """把 AnalysisReport 转为模板所需字段字典。
 
@@ -59,6 +80,7 @@ def _report_to_template_item(report: AnalysisReport) -> dict:
         "support_2_pct": _format_pct(report.support_2.distance_pct) if report.support_2 else None,
         "resistance_1_price": report.resistance_1.price if report.resistance_1 else None,
         "resistance_1_pct": _format_pct(report.resistance_1.distance_pct) if report.resistance_1 else None,
+        "indicator_line": _build_indicator_line(report),
         "summary": report.summary,
     }
 

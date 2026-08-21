@@ -1,5 +1,7 @@
 """
 @description 趋势状态判断（规则法），基于均线排列判断多头/空头/震荡。
+
+历史不足 60 根时退化为仅用 20 日均线判断，避免次新标的直接判为"数据不足"。
 """
 
 import pandas as pd
@@ -14,9 +16,11 @@ def judge_trend(close: pd.Series) -> str:
       - 收盘价 > MA20 > MA60 → 多头
       - 收盘价 < MA20 < MA60 → 空头
       - 否则 → 震荡
+      - MA60 缺失（历史不足 60 根）时退化为收盘价与 MA20 比较
+      - 连 MA20 都无法计算 → 数据不足
 
     :param close: 收盘价序列。
-    :returns: 趋势标签：多头 / 空头 / 震荡 / 未知。
+    :returns: 趋势标签：多头 / 空头 / 震荡 / 数据不足 / 未知。
     """
     if len(close) == 0:
         return "未知"
@@ -25,8 +29,16 @@ def judge_trend(close: pd.Series) -> str:
     ma20 = calc_ma(close, 20)
     ma60 = calc_ma(close, 60)
 
-    if ma20 is None or ma60 is None:
+    if ma20 is None:
         return "数据不足"
+
+    if ma60 is None:
+        # 历史不足 60 根：仅以 MA20 为参照，保证次新标的仍可给出方向
+        if current > ma20:
+            return "多头"
+        if current < ma20:
+            return "空头"
+        return "震荡"
 
     if current > ma20 > ma60:
         return "多头"

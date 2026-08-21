@@ -10,10 +10,15 @@ import pytest
 
 from scx_stock.analysis.engine import analyze, fallback_summary
 from scx_stock.analysis.indicators import (
+    calc_kdj,
     calc_ma,
+    calc_macd,
+    calc_period_change,
     calc_pivot_points,
     calc_recent_high,
     calc_recent_low,
+    calc_rsi,
+    calc_volume_ratio,
     to_dataframe,
 )
 from scx_stock.analysis.support import _strength_label, find_resistances, find_supports
@@ -117,6 +122,67 @@ class TestIndicators:
         assert df.empty
         assert "close" in df.columns
 
+    def test_calc_macd_uptrend(self):
+        """单调上涨序列 MACD DIF/DEA 为正。"""
+        import pandas as pd
+
+        close = pd.Series([4.0 + i * 0.01 for i in range(120)])
+        macd = calc_macd(close)
+        assert macd is not None
+        dif, dea, hist = macd
+        assert dif > 0
+        assert dea > 0
+        assert hist == pytest.approx(dif - dea, abs=1e-9)
+
+    def test_calc_macd_insufficient_data(self):
+        """数据不足返回 None。"""
+        import pandas as pd
+
+        assert calc_macd(pd.Series([1.0, 2.0, 3.0])) is None
+
+    def test_calc_rsi_extreme(self):
+        """单调上涨 RSI 趋近 100。"""
+        import pandas as pd
+
+        close = pd.Series([4.0 + i * 0.01 for i in range(120)])
+        rsi = calc_rsi(close)
+        assert rsi is not None
+        assert rsi > 90
+
+    def test_calc_kdj_basic(self):
+        """KDJ 返回 (K, D, J) 三元组。"""
+        df = to_dataframe(_make_bars(n=120))
+        kdj = calc_kdj(df)
+        assert kdj is not None
+        k, d, j = kdj
+        assert 0 <= k <= 100
+        assert 0 <= d <= 100
+        assert j is not None
+
+    def test_calc_volume_ratio_spike(self):
+        """最后一根放量时量比显著大于 1。"""
+        bars = _make_bars(n=30, trend="flat")
+        bars[-1].volume = bars[-2].volume * 3
+        df = to_dataframe(bars)
+        ratio = calc_volume_ratio(df)
+        assert ratio is not None
+        assert ratio > 2
+
+    def test_calc_volume_ratio_insufficient(self):
+        """K 线不足 6 根返回 None。"""
+        df = to_dataframe(_make_bars(n=5))
+        assert calc_volume_ratio(df) is None
+
+    def test_calc_period_change(self):
+        """区间涨跌幅计算正确。"""
+        import pandas as pd
+
+        close = pd.Series([4.0 + i * 0.01 for i in range(120)])
+        change = calc_period_change(close, 5)
+        assert change is not None
+        assert change > 0
+        assert calc_period_change(close, 200) is None
+
 
 # ---------------------------------------------------------------------------
 # support 测试
@@ -190,11 +256,20 @@ class TestTrend:
         assert judge_trend(pd.Series([], dtype=float)) == "未知"
 
     def test_insufficient_data(self):
-        """数据不足返回'数据不足'。"""
+        """连 MA20 都无法计算时返回'数据不足'。"""
         import pandas as pd
 
         close = pd.Series([1, 2, 3], dtype=float)
         assert judge_trend(close) == "数据不足"
+
+    def test_degraded_trend_without_ma60(self):
+        """历史不足 60 根时退化为 MA20 判断，不再直接'数据不足'。"""
+        import pandas as pd
+
+        up = pd.Series(list(range(1, 41)), dtype=float)  # 40 根递增
+        assert judge_trend(up) == "多头"
+        down = pd.Series(list(range(40, 0, -1)), dtype=float)  # 40 根递减
+        assert judge_trend(down) == "空头"
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +314,44 @@ class TestEngine:
         summary = fallback_summary(report)
         assert "多头" in summary
         assert "支撑" in summary
+
+    def test_analyze_fills_indicator_fields(self):
+        """分析结果填充量比/RSI/MACD/KDJ/区间涨跌幅字段。"""
+        kline = _make_kline(n=120, trend="up")
+        report = analyze(kline)
+        assert report.volume_ratio is not None
+        assert report.rsi14 is not None
+        assert report.macd_dif is not None
+        assert report.macd_dea is not None
+        assert report.macd_hist is not None
+        assert report.kdj_j is not None
+        assert report.change_5d is not None and report.change_5d > 0
+        assert report.change_20d is not None and report.change_20d > 0
+
+    def test_analyze_short_history_trend_note(self):
+        """次新标的（30~59 根）趋势降级判断并附备注。"""
+        kline = _make_kline(n=40, trend="up")
+        report = analyze(kline)
+        assert report.ok is True
+        assert report.trend == "多头"
+        assert report.ma60 is None
+        assert "20日均线" in report.trend_note
+
+    def test_fallback_summary_no_bad_phrase(self):
+        """趋势无法判断时不得拼出'数据不足趋势'类病句。"""
+        report = analyze(_make_kline(n=120, trend="up"))
+        report.trend = "数据不足"
+        summary = fallback_summary(report)
+        assert "数据不足趋势" not in summary
+        assert "不足以判断趋势" in summary
+
+    def test_fallback_summary_rich_content(self):
+        """降级摘要包含近期涨跌与量能信息。"""
+        report = analyze(_make_kline(n=120, trend="up"))
+        summary = fallback_summary(report)
+        assert "近5日" in summary
+        assert "量比" in summary
+        assert "MACD" in summary
 
     def test_fallback_summary_failed_report(self):
         """失败 report 的降级摘要含错误信息。"""
